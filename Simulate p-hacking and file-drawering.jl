@@ -2,9 +2,6 @@ using Random, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature
 
 const Z̄ = 1.9599639845401
 
-# fold the unit-square parameter space across a+b=1
-fold(a,b) = a+b>1 ? (1-b,1-a) : (a,b)
-
 @inline diffcdf(N,a,b) = cdf(N,b) - cdf(N,a)
 
 import Base.rand, Distributions.pdf, Distributions.logpdf, Distributions.cdf, Distributions.logcdf, Distributions.ccdf, Distributions.logccdf, Statistics.quantile
@@ -66,30 +63,35 @@ function SimplextoRⁿ(p::Vector{T}) where T
 	q .= logit.(q)
 end
 
-
-function HnFl(z::T, p::Vector{T}, μ::Vector, τ::Vector{T}, pD::T, pF::T, u::T, m::T; truncate=true) where T<:Number
-	pH = m * (1 - pD - pF)
+# unlogged likelihood for a single observation. For graphs.
+function HnFl(z; p::Vector, μ::Vector, τ::Vector, pF₀, pL₀, pU₀, kL=0, kU=0, m=1, truncate=true)
+	pL = pL₀ * exp(-kL*(Z̄+z))
+	pU = pU₀ * exp(-kU*(Z̄-z))
+	pF = pF₀ * (1 - pL - pU)
+	pD = 1 - pL - pU - pF
 	length(p) < length(μ) && (p = [p; 1-sum(p)])
+	σ² = 1 .+ τ.^2
 	𝒩  = Normal()
-	𝒩μ = @. Normal(μ, √(1 + τ^2))
+	𝒩μ = @. Normal(μ, √σ²)
 	𝒩ω = @. NormalCanon(z + μ/τ^2, 1 + 1/τ^2)
 	if abs(z) ≥ Z̄
-		result = zero(T)
+		result = 0.
 		@inbounds for (pᵢ,𝒩μᵢ,𝒩ωᵢ) ∈ zip(p,𝒩μ,𝒩ω)
-			if z < 0
-				result += pᵢ * pdf(𝒩μᵢ, z) * (one(T) + pH * (1-u) * quadgk(ω -> (a = pdf(𝒩ωᵢ,ω)*(cdf(𝒩,Z̄-ω)-cdf(𝒩,-Z̄-ω)) * ccdf(𝒩,z-ω)^(m-1) / (1-ccdf(𝒩, -Z̄-ω)^m);
-																																		 isnan(a) || isinf(a) ? 0. : a), 
-																                               -Inf, Inf)[1])
+			if z < 0.
+				result += pᵢ * pdf(𝒩μᵢ, z) * (1 + m * pL₀ * exp(kL*(kL/2-Z̄)) * quadgk(ω -> (a = pdf(𝒩ωᵢ,ω) * exp(-kL*ω) * diffcdf(𝒩, Z̄-ω+kL, -Z̄-ω+kL) * ccdf(𝒩,z-ω)^(m-1) / (1-ccdf(𝒩, -Z̄-ω)^m);
+																																		                 isnan(a) || isinf(a) ? 0. : a), 
+																                                               -Inf, Inf)[1])
 			else
-				result += pᵢ * pdf(𝒩μᵢ, z) * (one(T) + pH *    u  * quadgk(ω -> (a = pdf(𝒩ωᵢ,ω)*(cdf(𝒩,Z̄-ω)-cdf(𝒩,-Z̄-ω)) * cdf(𝒩,z-ω)^(m-1) / (1 - cdf(𝒩,  Z̄-ω)^m);
-																																		 isnan(a) || isinf(a) ? 0. : a), 
-																                               -Inf, Inf)[1])
+				result += pᵢ * pdf(𝒩μᵢ, z) * (1 + m * pU₀ * exp(kU*(kU/2-Z̄)) * quadgk(ω -> (a = pdf(𝒩ωᵢ,ω) * exp( kU*ω) * diffcdf(𝒩, Z̄-ω-kU, -Z̄-ω-kU) * cdf(𝒩,z-ω)^(m-1) / (1 - cdf(𝒩,  Z̄-ω)^m);
+																																		                 isnan(a) || isinf(a) ? 0. : a), 
+																                                               -Inf, Inf)[1])
 			end
 		end
 	else
 		result = pD * dot(p, pdf.(𝒩μ, z))
 	end
-	truncate && (result /= (1 - pF * dot(p, (cdf.(𝒩μ,Z̄) - cdf.(𝒩μ,-Z̄)))))
+	truncate && (result /= 1 - pF₀ * dot(p, @. (diffcdf(𝒩μ, Z̄, -Z̄) - pL₀ * exp(kL*(σ²*kL/2-μ-Z̄)) * diffcdf(𝒩μ,  σ²*kL+Z̄,  σ²*kL-Z̄)
+	                                                                - pU₀ * exp(kU*(σ²*kU/2+μ-Z̄)) * diffcdf(𝒩μ, -σ²*kU+Z̄, -σ²*kU-Z̄)  )))
 	result
 end
 
@@ -109,7 +111,7 @@ end
 function HnFstuff(z::Vector{Float64}; D::Int, interpres::Int, quadnodes::Int)
 	zC = z[abs.(z) .< Z̄]
 
-	s = Z̄ - 3/interpres; e = maximum(z)+.1
+	s = Z̄ - 3/interpres; e = max(10,maximum(z))+.1
 	knots = s : 1/interpres : e  # LinRange(s, e, ceil(Int, (e - s) * interpres) + 1)
 	zSint = (-z[z .≤ -Z̄] .- s) .* interpres .+ 1, (z[z .≥ Z̄] .- s) .* interpres .+ 1  # map tail z values to knot numbering 1, 2, ... for Z̄-3/interpres, Z̄-2/interpres, ...
 	
@@ -119,61 +121,70 @@ function HnFstuff(z::Vector{Float64}; D::Int, interpres::Int, quadnodes::Int)
 	HnFstuff(D, z, zC, length(z), length(zC), length.(zSint)..., knots, BSpline(Quadratic(Free(OnGrid()))), zSint, X, W, log.(W))
 end
 
+try Base.delete_method.(methods(HnFll)) catch end
 # bulk log probabilities as function of data & parameters, for estimation
-function HnFll(o::HnFstuff, p::Vector{T}, μ::Vector, τ::Vector{T}, pD::T, pF::T, u::T, m::T) where T<:Number
+function HnFll(o::HnFstuff, p::Vector{T}, μ::Vector, τ::Vector{T}, pF₀::T, pL₀::T, pU₀::T, kL::T, kU::T, m::T) where T<:Real
 	τ = exp.(τ)
+	kL = exp(kL)
+	kU = exp(kU)
 	m = exp(m); mm1 = m - one(T)
-	u = logistic(u)
 	p = RⁿtoSimplex(p)
-	pD, pF, _pH = RⁿtoSimplex([pD,pF])
-	pH = m * _pH * [one(T)-u u]
-
+	pF₀ = logistic(pF₀)
+	pL₀ = logistic(pL₀)
+	pU₀ = logistic(pU₀)
+	pL₀+pU₀>1 && return(T(NaN))
+	pD₀ = 1 - pF₀
+	pH = [m*pL₀*exp(kL*(kL/2-Z̄)), m*pU₀*exp(kU*(kU/2-Z̄))]
 	LC = fill(zero(T), o.NC)  # likelihood for insignificant obs
 	LS = fill(zero(T), o.NL), fill(zero(T), o.NU)  # for significant obs, left & right tails
 
+	σ² = 1 .+ (τ² = τ.^2)
 	𝒩  = Normal()
-	𝒩μ = Normal.(μ, .√(1 .+ τ.^2))
+	𝒩μ = Normal.(μ, .√σ²)
 
-	for (pᵢ,μᵢ,τᵢ,𝒩μᵢ) ∈ zip(p,μ,τ,𝒩μ)
-		σ² = τᵢ^2; σ² /= one(T)+σ²; σ = √σ²
-
+	for (pᵢ,μᵢ,τᵢ²,σᵢ²,𝒩μᵢ) ∈ zip(p,μ,τ²,σ²,𝒩μ)
 		# math on integration and interpolation points, outside loops
-		X  = o.X * (√2 * σ)
-		XU =  Z̄ .- X
-		XL = -Z̄ .- X
-		𝒩X = Normal.(X)
+		Ω  = o.X * √(2τᵢ² / σᵢ²)  # 1st-order component of change of variables from pdf(Normal(ω)) to exp(-x²) for Gauss-Hermite quadrature
+		ΩL = -Z̄ .- Ω
+		ΩU =  Z̄ .- Ω
+		𝒩Ω = Normal.(Ω)
 
 		buf = Vector{T}(undef, length(o.knots))  # pre-allocating this hampers automatic differentiation since type changes
 
 		# lower tail
-		k1 = collect((μᵢ/τᵢ^2 .- o.knots) .* -σ²)  #    -(z+μᵢ⁄τᵢ²)/(1+1⁄τᵢ²) for z at interpolation points
-		k2 = collect(k1 - o.knots  )               # z - (z+μᵢ⁄τᵢ²)/(1+1⁄τᵢ²) for z at interpolation points
+		kt1 = collect((μᵢ/τᵢ² .- o.knots) * -τᵢ²/σᵢ²)  #    -(z+μᵢ⁄τᵢ²)/(1+1⁄τᵢ²) for z at interpolation points -- negated 0th-order component of change of variables for quadrature
+		kt2 = collect(kt1 - o.knots                 )  # z - (z+μᵢ⁄τᵢ²)/(1+1⁄τᵢ²) for z at interpolation points
 		fill!(buf, zero(T))
 		@inbounds Threads.@threads for j ∈ eachindex(o.knots)
-			k1j, k2j = k1[j], k2[j]
-			for (𝒩x,xl,xu,lnw) ∈ zip(𝒩X,XL,XU,o.lnW)  # quadrature integration
-				buf[j] += exp(lnw + logdiffcdf(𝒩, k1j + xu, k1j + xl) + mm1 * logccdf(𝒩x, k2j) - log1mexp(m * logccdf(𝒩, k1j + xl)))
+			kt1j, kt2j = kt1[j], kt2[j]
+			for (𝒩ω,ω,ωl,ωu,lnw) ∈ zip(𝒩Ω,Ω,ΩL,ΩU,o.lnW)  # quadrature integration
+				buf[j] += exp(lnw - kL * (ω - kt1j) + logdiffcdf(𝒩, kt1j + ωu + kL, kt1j + ωl + kL) + mm1 * logccdf(𝒩ω, kt2j) - log1mexp(m * logccdf(𝒩, kt1j + ωl)))
 			end
 		end
-		buf .= pᵢ .* pdf.(𝒩μᵢ, -o.knots) .* (one(T) .+ pH[1] .* buf)
+		@. buf = pᵢ * pdf(𝒩μᵢ, -o.knots) * (one(T) + pH[1] * buf)
 		LS[1] .+= interpolate!(buf, o.spline).(o.zSint[1])  # likelihoods for significant observations
 
 		# upper tail
-		k1 .= collect((μᵢ/τᵢ^2 .+ o.knots) .* -σ²)  #    -(z+μᵢ⁄τᵢ²)/(1+1⁄τᵢ²) for z at interpolation points
-		k2 .= collect(k1 + o.knots               )  # z - (z+μᵢ⁄τᵢ²)/(1+1⁄τᵢ²) for z at interpolation points
+		kt1 .= collect((μᵢ/τᵢ² .+ o.knots) * -τᵢ²/σᵢ²)  #    -(z+μᵢ⁄τᵢ²)/(1+1⁄τᵢ²) for z at interpolation points
+		kt2 .= collect(kt1 + o.knots                 )  # z - (z+μᵢ⁄τᵢ²)/(1+1⁄τᵢ²) for z at interpolation points
 		fill!(buf, zero(T))
 		@inbounds Threads.@threads for j ∈ eachindex(o.knots)
-			k1j, k2j = k1[j], k2[j]
-			for (𝒩x,xl,xu,lnw) ∈ zip(𝒩X,XL,XU,o.lnW)  # quadrature integration
-				buf[j] += exp(lnw + logdiffcdf(𝒩, k1j + xu, k1j + xl) + mm1 * logcdf(𝒩x, k2j) - log1mexp(m * logcdf(𝒩, k1j + xu)))
+			kt1j, kt2j = kt1[j], kt2[j]
+			for (𝒩ω,ω,ωl,ωu,lnw) ∈ zip(𝒩Ω,Ω,ΩL,ΩU,o.lnW)  # quadrature integration
+				buf[j] += exp(lnw + kU * (ω - kt1j) + logdiffcdf(𝒩, kt1j + ωu - kU, kt1j + ωl - kU) + mm1 * logcdf(𝒩ω, kt2j) - log1mexp(m * logcdf(𝒩, kt1j + ωu)))
 			end
 		end
-		buf .= pᵢ .* pdf.(𝒩μᵢ, o.knots) .* (one(T) .+ pH[2] .* buf)
+		@. buf = pᵢ * pdf(𝒩μᵢ, o.knots) * (one(T) + pH[2] * buf)
 		LS[2] .+= interpolate!(buf, o.spline).(o.zSint[2])  # likelihoods for significant observations
 
-		LC .+= (pᵢ * pD) .* pdf.(𝒩μᵢ, o.zC)  # likelihoods for center/insignificant observations
+		@. LC += pᵢ * pdf(𝒩μᵢ, o.zC)  # likelihoods for center/insignificant observations
 	end
-	return(mapreduce(v->ThreadsX.mapreduce(log, +, v, init=zero(T)), +, (LC,LS...)) - xlog1py(o.N, -pF * dot(p, (cdf.(𝒩μ,Z̄) - cdf.(𝒩μ,-Z̄)))))
+# XXX move interpolation out of above loop and interpolate log likelihood instead?
+# XXX precompute Z̄ + o.zC, Z̄ - o.zC
+	mapreduce(v->ThreadsX.mapreduce(log, +, v, init=zero(T)), +, (LC, LS...)) +
+		o.NC * log(pD₀) + mapreduce(z->log1p(- pL₀ * exp(-kL * (Z̄ + z)) - pU₀ * exp(-kU * (Z̄ - z))), +, o.zC, init=zero(T)) - 
+    xlog1py(o.N, -pF₀ * dot(p, @. diffcdf(𝒩μ,Z̄,-Z̄) - pL₀ * exp(kL*(σ²*kL/2-μ-Z̄)) * diffcdf(𝒩μ, Z̄+σ²*kL, -Z̄+σ²*kL) -
+		                                                  pU₀ * exp(kU*(σ²*kU/2+μ-Z̄)) * diffcdf(𝒩μ, Z̄-σ²*kU, -Z̄-σ²*kU)))
 end
 
 # log likelihood--function of parameters only
@@ -243,66 +254,74 @@ Cquant(α, z, pD, pF, u, m) = find_zero(ω -> α - FZcondΩ(z, ω, pD, pF, u, m)
 CI(α, z, pD, pF, u, m) = Cquant(α/2, z, pD, pF, u, m), Cquant(1-α/2, z, pD, pF, u, m)
 
 
-function HnFDGP(N, p, μ, τ, pD, pF, u, m)
-	p = vcat(p)
-	μ = vcat(μ)
-	τ = vcat(τ)
+function HnFDGP(N; p::Vector, μ::Vector, τ::Vector, pF₀, pL₀, pU₀, kL=0, kU=0, m=1, truncate=true)
+	isone(length(μ)) && (μ = fill(μ[], length(τ)))
 	length(p) < length(μ) && (p = [p; 1-sum(p)])
-	pDF = pD + pF
-	pDFu = pDF + (1 - pDF) * u
 
 	I = rand(Categorical(p), N)
 	Ω = map(i->rand(Normal(μ[i], τ[i])), I)
 	Z✻ = rand.(Normal.(Ω))
 	Z = similar(Z✻)
 	@inbounds Threads.@threads for i ∈ eachindex(Z✻)
-		if abs(Z✻[i]) > Z̄
-			Z[i] = Z✻[i]
+		Z✻ᵢ = Z✻[i]
+		if abs(Z✻ᵢ) > Z̄
+			Z[i] = Z✻ᵢ  # publish significant result as is
 		else
+			pL = pL₀ * exp(-kL*(Z̄+Z✻ᵢ))  # probability of hacking to lower tail
+			pU = pU₀ * exp(-kU*(Z̄-Z✻ᵢ))  # probability of hacking to upper tail
+			pF = pF₀ * (1 - pL - pU)
+			pD = 1 - pL - pU - pF
 			r = rand()
 			if r < pD
-				Z[i] = Z✻[i]
-			elseif r < pDF
-				Z[i] = NaN
-			elseif r < pDFu
-				𝒩 = MaxNormal(m,Ω[i])
-				Z[i] = quantile(𝒩, rand(Uniform(cdf(𝒩, Z̄), 1.)))
-			else
+				Z[i] = Z✻ᵢ  # publish insignificant result as is
+			elseif r < pD + pF
+				Z[i] = NaN  # file-drawer
+			elseif r < pD + pF + pL
 				𝒩 = MinNormal(m,Ω[i])
-				Z[i] = quantile(𝒩, rand(Uniform(0., cdf(𝒩, -Z̄))))
+				Z[i] = quantile(𝒩, rand(Uniform(0., cdf(𝒩, -Z̄))))  # hack to lower tail
+			else
+				𝒩 = MaxNormal(m,Ω[i])
+				Z[i] = quantile(𝒩, rand(Uniform(cdf(𝒩, Z̄), 1.)))  # hack to upper tail
 			end
 		end
 	end
-	keep = .!isnan.(Z) .&& abs.(Z).<10
-	(Ω=Ω[keep], Z✻=Z✻[keep], Z=Z[keep])
+	if truncate
+		keep = .!isnan.(Z) .&& abs.(Z).<10
+		Ω=Ω[keep]
+		Z✻=Z✻[keep]
+		Z=Z[keep]
+	end
+	(Ω=Ω, Z✻=Z✻, Z=Z)  # named tuple with results
 end
 
 
 # confirm match between model and simulation
-pD = .4
-pF = .3
-u = .8
-p = [.7]
-μ = [-1.,1.]
-τ = [2.,2.]
-m = 5.6
+pF₀ = .3
+pL₀ = .3
+pU₀ = .3
+kL = 2.
+kU = 1.
+p = [1.]
+μ = [1.]
+τ = [2.]
+m = 5.
 
-z = HnFDGP(3_000_000,p,μ,τ,pD,pF,u,m).Z
+z = HnFDGP(3_000_000; p, μ, τ, pF₀, pL₀, pU₀, kL, kU, m, truncate=true).Z
 
 histogram(z, normalize=:pdf, legend=false)
-zplot = -9:.1:9
-plot!(zplot, map(z->.01+HnFl(z,p,μ,τ,pD,pF,u,m), zplot))
-plot!(zplot, map(z->.02+exp(-negHnFll(HnFstuff([z], D=length(μ), interpres=300, quadnodes=25))(vcat(logit.(p),μ,log.(τ),logit(pD),logit(pF),logit(u),log(m)))),zplot))
+zplot = -10:.1:10
+pplot = map(z->.01+HnFl(z; p, μ, τ, pF₀, pL₀, pU₀, kL, kU, m, truncate=true), zplot)
+plot!(zplot, pplot)
+plot!(zplot, map(z->.02+exp(-negHnFll(HnFstuff([z], D=length(μ), interpres=300, quadnodes=25))(vcat(SimplextoRⁿ(p),μ,log.(τ),logit(pF₀),logit(pL₀),logit(pU₀),log(kL),log(kU),log(m)))),zplot))
 
 o = HnFstuff(z, D=length(μ), interpres=300, quadnodes=25)
-@time res = optimize(negHnFll(o), vcat(logit.(p),μ,log.(τ),logit(pD),logit(pF),logit(u),log(m)), LBFGS(), autodiff=:forward)
+@time res = optimize(negHnFll(o), vcat(SimplextoRⁿ(p),μ,log.(τ),logit(pF₀),logit(pL₀),logit(pU₀),log(kL),log(kU),log(m)), LBFGS(), autodiff=:forward)
 θ₂ = Optim.minimizer(res)
-p̂, μ̂ , τ̂ , p̂D, p̂F, û, m̂ = logistic.(θ₂[1:o.D-1]), θ₂[o.D:2*o.D-1], exp.(θ₂[2*o.D:3*o.D-1]), logistic(θ₂[3*o.D]), logistic(θ₂[3*o.D+1]), logistic(θ₂[3*o.D+2]), exp(θ₂[3*o.D+3])
-p̂ = vcat(p̂, 1-sum(p̂))
-p̂D, p̂F = fold(p̂D, p̂F)
-println((p̂=p̂, μ̂ =μ̂ , τ̂ =τ̂ , p̂D=p̂D, p̂F=p̂F, û=û, m̂=m̂))
+p̂, μ̂ , τ̂ , p̂F₀, p̂L₀, p̂U₀, k̂L, k̂U, m̂ = RⁿtoSimplex(θ₂[1:o.D-1]), θ₂[o.D:2*o.D-1], exp.(θ₂[2*o.D:3*o.D-1]), logistic(θ₂[3*o.D]), logistic(θ₂[3*o.D+1]), logistic(θ₂[3*o.D+2]), exp(θ₂[3*o.D+3]), exp(θ₂[3*o.D+4]), exp(θ₂[3*o.D+5])
+p̂D₀ = 1 - p̂F₀
+println((p̂=p̂, μ̂ =μ̂ , τ̂ =τ̂ , p̂F₀=p̂F₀, p̂L₀=p̂L₀, p̂U₀=p̂U₀, k̂L=k̂L, k̂U=k̂U, m̂=m̂))
 
-plot!(zplot, map(z->.03+HnFl(z, p̂, μ̂ , τ̂ , p̂D, p̂F, û, m̂), zplot))
+plot!(zplot, map(z->HnFl(z; p=p̂, μ=μ̂ , τ=τ̂ , pF₀=p̂F₀, pL₀=p̂L₀, pU₀=p̂U₀, kL=k̂L, kU=k̂U, m=m̂), zplot))
 
 
 # data prep
@@ -401,21 +420,25 @@ df = DataFrame(Dict(:z => df.coefficient_num ./ df.standard_deviation_num))
 dropmissing!(df)
 @subset!(df, abs.(:z).<20)
 df.z = Float64.(df.z)
-histogram(abs.(df.z), normalize=:pdf, bins=1000)
+histogram(df.z, normalize=:pdf, bins=100)
 
 p = [.3,.3,.4]
 μ = 0.
 τ = [1.,2.,3.]
-pD = .5
-pF = .25
-pH = 1 - pD - pF
-u = .75
+pF₀ = .25
+pL₀ = .2
+pU₀ = .2
+kL = 1.
+kU = 1.
 m = 3.
 
 o = HnFstuff(df.z, D=length(τ), interpres=300, quadnodes=25)
-@time res = optimize(negHnFllSharedμ(o), vcat(SimplextoRⁿ(p),μ,log.(τ),SimplextoRⁿ([pD,pF,pH])...,logit(u),log(m)), LBFGS(), autodiff=:forward)
-θ, ll = Optim.minimizer(res), Optim.minimum(res)
-# p̂, μ̂ , τ̂ , p̂D, p̂F, p̂H, û, m̂ = RⁿtoSimplex(θ[1:o.D-1]), θ[o.D:2*o.D-1], exp.(θ[2*o.D:3*o.D-1]), RⁿtoSimplex(θ[3*o.D:3*o.D+1])..., logistic(θ[3*o.D+2]), exp(θ[3*o.D+3])
-p̂, μ̂ , τ̂ , p̂D, p̂F, p̂H, û, m̂ = RⁿtoSimplex(θ[1:o.D-1]), θ[o.D], exp.(θ[o.D+1:2*o.D]), RⁿtoSimplex(θ[2*o.D+1:2*o.D+2])..., logistic(θ[2*o.D+3]), exp(θ[2*o.D+4])
-println((p̂=p̂, μ̂ =μ̂ , τ̂ =τ̂ , p̂D=p̂D, p̂F=p̂F, p̂H=p̂H, û=û, m̂=m̂))
+@time res = optimize(negHnFllSharedμ(o), vcat(SimplextoRⁿ(p),μ,log.(τ),logit(pF₀),logit(pL₀),logit(pU₀),log(kL),log(kU),log(m)), LBFGS(), autodiff=:forward)
+θ₂ = Optim.minimizer(res)
+p̂, μ̂ , τ̂ , p̂F₀, p̂L₀, p̂U₀, k̂L, k̂U, m̂ = RⁿtoSimplex(θ₂[1:o.D-1]), θ₂[o.D], exp.(θ₂[o.D+1:2*o.D]), logistic(θ₂[2*o.D+1]), logistic(θ₂[2*o.D+2]), logistic(θ₂[2*o.D+3]), exp(θ₂[2*o.D+4]), exp(θ₂[2*o.D+5]), exp(θ₂[2*o.D+6])
+p̂D₀ = 1 - p̂F₀
+println((p̂=p̂, μ̂ =μ̂ , τ̂ =τ̂ , p̂F₀=p̂F₀, p̂L₀=p̂L₀, p̂U₀=p̂U₀, k̂L=k̂L, k̂U=k̂U, m̂=m̂))
 ses = sqrt.(diag(pinv(ForwardDiff.hessian(negHnFllSharedμ(o), θ))))
+zplot = -20:.1:20
+pplot = map(z->HnFl(z; p=p̂, μ=fill(μ̂ ,o.D), τ=τ̂ , pF₀=p̂F₀, pL₀=p̂L₀, pU₀=p̂U₀, kL=k̂L, kU=k̂U, m=m̂), zplot)
+plot!(zplot, pplot)
