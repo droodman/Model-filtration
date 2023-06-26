@@ -2,7 +2,7 @@ using Random, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature
 
 const Z̄ = 1.9599639845401
 
-@inline diffcdf(N,a,b) = cdf(N,b) - cdf(N,a)
+@inline diffcdf(N,b,a) = cdf(N,b) - cdf(N,a)
 
 import Base.rand, Distributions.pdf, Distributions.logpdf, Distributions.cdf, Distributions.logcdf, Distributions.ccdf, Distributions.logccdf, Statistics.quantile
 
@@ -192,7 +192,7 @@ negHnFll(o)        = v -> -HnFll(o, v[1:o.D-1], v[o.D:2*o.D-1], v[2*o.D:3*o.D-1]
 negHnFll0cent(o)   = v -> -HnFll(o, v[1:o.D-1], zeros(Float64,o.D), v[o.D:2*o.D-1], v[2*o.D:end]...)  # impose μ=0
 negHnFllSharedμ(o) = v -> -HnFll(o, v[1:o.D-1], fill(v[o.D],o.D), v[o.D+1:2*o.D], v[2*o.D+1:end]...) # impose shared μ
 
-function HnFCDF(o::HnFstuff, z::T, p::Vector{T}, μ::Vector{T}, τ::Vector{T}, pD::T, pF::T, U) where T<:Number
+function HnFCDF(o::HnFstuff, z::T, p::Vector{T}, μ::Vector{T}, τ::Vector{T}, pD₀::T, pF::T, U) where T<:Number
 	pH = 1 - pD - pF
 
 	𝒩H = Normal.(√2τ * o.X' .+ μ)
@@ -211,33 +211,34 @@ function HnFCDF(o::HnFstuff, z::T, p::Vector{T}, μ::Vector{T}, τ::Vector{T}, p
 end
 
 # f(z|ω)
-function fZcondΩ(z, ω, pD, pF, u, m; truncate=true)
-	pH = 1 - pD - pF
-	result = abs(z) < Z̄ ? pD * pdf(Normal(ω),z) :
-	         pdf(Normal(ω),z) + pH * exp(logdiffcdf(Normal(ω),Z̄,-Z̄) + (z ≤ -Z̄ ? log1p(-u) + logpdf(MinNormal(m,ω),z) -  logcdf(MinNormal(m,ω),-Z̄) :
-					                                                                    log(   u) + logpdf(MaxNormal(m,ω),z) - logccdf(MaxNormal(m,ω), Z̄)  ))
-	truncate && (result /= (1 - pF *(cdf(Normal(ω), Z̄) - cdf(Normal(ω),-Z̄))))
+function fZcondΩ(z, ω; pF₀, pL₀, pU₀, kL, kU, m, truncate=true)
+	pD₀ = 1 - pF₀
+	result = abs(z) < Z̄ ? pdf(Normal(ω),z) * pD₀ * (1 - pL₀ * exp(-kL*(Z̄+z)) - pU₀ * exp(-kU*(Z̄-z))) :
+							          pdf(Normal(ω),z) + exp(z < 0 ? logpdf(MinNormal(m,ω),z) - logcdf( MinNormal(m,ω),-Z̄) + log(pL₀) + kL*(kL/2-Z̄-ω) + logdiffcdf(Normal(ω-kL),Z̄,-Z̄) :
+											                                 logpdf(MaxNormal(m,ω),z) - logccdf(MaxNormal(m,ω), Z̄) + log(pU₀) + kU*(kU/2-Z̄+ω) + logdiffcdf(Normal(ω+kU),Z̄,-Z̄)  )
+	truncate && (result /= (1 - pF₀ * (diffcdf(Normal(ω), Z̄,-Z̄) - pL₀ * exp(kL*(kL/2-Z̄-ω)) * diffcdf(Normal(ω-kL),Z̄,-Z̄) - pU₀ * exp(kU*(kU/2-Z̄-ω)) * diffcdf(Normal(ω+kU),Z̄,-Z̄))))
 	isnan(result) || isinf(result) ? 0. : result
 end
 
 # F(z|ω)
-function FZcondΩ(z, ω, pD, pF, u, m)
-	pH = 1 - pD - pF
-	l = 1 - u
+function FZcondΩ(z, ω; pF₀, pL₀, pU₀, kL, kU, m)
+	pD₀ = 1 - pF₀
 	𝒩 = Normal(ω)
-	a = cdf(𝒩,-Z̄)
-	b = cdf(𝒩, Z̄)
+	D = diffcdf(Normal(ω), Z̄,-Z̄) - pL₀ * exp(kL*(kL/2-Z̄-ω)) * diffcdf(Normal(ω-kL),Z̄,-Z̄) - 
+	                               pU₀ * exp(kU*(kU/2-Z̄-ω)) * diffcdf(Normal(ω+kU),Z̄,-Z̄)  # P[no p-hack]
 	if z > Z̄  # tails
 		𝒩max = MaxNormal(m,ω)
-		result = 1 - (u * pH * exp(logccdf(𝒩max,z) - logccdf(𝒩max,Z̄) + logdiffcdf(𝒩, Z̄, -Z̄)) + ccdf(𝒩,z)) / (1-pF*(b-a))
+		result = 1 - (pU₀ * exp(logccdf(𝒩max,z) - logccdf(𝒩max,Z̄) + kU*(kU/2-Z̄+ω) + logdiffcdf(𝒩, Z̄, -Z̄)) + ccdf(𝒩,z)) / (1 - pF₀ * D)
 	else
-		𝒩min = MinNormal(m,ω)
 		if z < -Z̄
-			result = l * pH * exp(logcdf(𝒩min, z) - cdf(𝒩min, -Z̄) + logdiffcdf(𝒩, Z̄, -Z̄)) + cdf(𝒩,z)
+			𝒩min = MinNormal(m,ω)
+			result =    pL₀ * exp(logcdf(𝒩min, z) - logcdf(𝒩min, -Z̄) + kL*(kL/2-Z̄-ω) + logdiffcdf(𝒩, kL+Z̄, kL-Z̄)) + cdf(𝒩,z)
 		else
-			result = l * pH * b + (1 - l * pH - pD) * a + pD * cdf(𝒩,z)
+			result =    pL₀ * exp(                                       kL*(kL/2-Z̄-ω) + logdiffcdf(𝒩, kL+Z̄, kL-Z̄)) + cdf(𝒩,-Z̄) + 
+			                pD₀ * (diffcdf(Normal(ω), z,-Z̄) - pL₀ * exp(kL*(kL/2-Z̄-ω)) * diffcdf(Normal(ω-kL),z,-Z̄) - 
+											                                  pU₀ * exp(kU*(kU/2-Z̄-ω)) * diffcdf(Normal(ω+kU),z,-Z̄)  )
 		end
-		result /= 1-pF*(b-a)
+		result /= 1 - pF₀ * D
 	end
 	result
 end
@@ -245,24 +246,23 @@ end
 
 # f(z), f(ω), f(ω|z), E[ω|z]
 fZ = HnFl
-fΩ(ω, p, μ, τ) = p'pdf.(Normal.(μ,τ), ω)
-fΩcondZ(ω, z, p, μ, τ, pD, pF, u, m) = fZcondΩ(z, ω, pD, pF, u, m, truncate=false) * fΩ(ω, p, μ, τ) / fZ(z, p, μ, τ, pD, pF, u, m, truncate=false)
-EΩcondZ(z, p, μ, τ, pD, pF, u, m) = quadgk(ω->ω * fΩcondZ(ω, z, p, μ, τ, pD, pF, u, m), -Inf, Inf)[1]
+fΩ(ω; p, μ, τ) = p'pdf.(Normal.(μ,τ), ω)
+fΩcondZ(ω, z; p, μ, τ, kwargs...) = fZcondΩ(z, ω; kwargs..., truncate=false) * fΩ(ω; p, μ, τ) / fZ(z; p, μ, τ, kwargs..., truncate=false)
+EΩcondZ(z; p, μ, τ, kwargs...) = quadgk(ω->ω * fΩcondZ(ω, z; p, μ, τ, kwargs...), -Inf, Inf)[1]
 
 # CIs
-Cquant(α, z, pD, pF, u, m) = find_zero(ω -> α - FZcondΩ(z, ω, pD, pF, u, m), (-20,20))
-CI(α, z, pD, pF, u, m) = Cquant(α/2, z, pD, pF, u, m), Cquant(1-α/2, z, pD, pF, u, m)
+Cquant(α, z; kwargs...) = find_zero(ω -> α - FZcondΩ(z, ω; kwargs...), (-20,20))
+CI(α, z; kwargs...) = Cquant(α/2, z; kwargs...), Cquant(1-α/2, z; kwargs...)
 
 
-function HnFDGP(N; p::Vector, μ::Vector, τ::Vector, pF₀, pL₀, pU₀, kL=0, kU=0, m=1, truncate=true)
+function HnFDGP(N; p::Vector, μ::Vector, τ::Vector, pF₀, pL₀, pU₀, kL=0, kU=0, m=1, truncate=true, ω=NaN)
 	isone(length(μ)) && (μ = fill(μ[], length(τ)))
 	length(p) < length(μ) && (p = [p; 1-sum(p)])
-
 	I = rand(Categorical(p), N)
-	Ω = map(i->rand(Normal(μ[i], τ[i])), I)
+	Ω = isnan(ω) ? map(i->rand(Normal(μ[i], τ[i])), I) : fill(ω,N)
 	Z✻ = rand.(Normal.(Ω))
 	Z = similar(Z✻)
-	@inbounds Threads.@threads for i ∈ eachindex(Z✻)
+	@inbounds #=Threads.@threads=# for i ∈ eachindex(Z✻)
 		Z✻ᵢ = Z✻[i]
 		if abs(Z✻ᵢ) > Z̄
 			Z[i] = Z✻ᵢ  # publish significant result as is
@@ -286,7 +286,7 @@ function HnFDGP(N; p::Vector, μ::Vector, τ::Vector, pF₀, pL₀, pU₀, kL=0,
 		end
 	end
 	if truncate
-		keep = .!isnan.(Z) .&& abs.(Z).<10
+		keep = @. !isnan(Z) && abs(Z)<10
 		Ω=Ω[keep]
 		Z✻=Z✻[keep]
 		Z=Z[keep]
@@ -299,12 +299,20 @@ end
 pF₀ = .3
 pL₀ = .3
 pU₀ = .3
-kL = 2.
-kU = 1.
+kL = 10.
+kU = 10.
 p = [1.]
-μ = [1.]
+μ = [0.]
 τ = [2.]
 m = 5.
+
+ω = .7
+zplot = -10:.1:10
+z = HnFDGP(3_000_000; p, μ, τ, pF₀, pL₀, pU₀, kL, kU, m, truncate=true, ω).Z
+histogram(z, normalize=:pdf)
+pplot = map(z->fZcondΩ(z, ω; pF₀, pL₀, pU₀, kL, kU, m, truncate=true), zplot)
+plot!(zplot, pplot)
+sum(pplot)/10
 
 z = HnFDGP(3_000_000; p, μ, τ, pF₀, pL₀, pU₀, kL, kU, m, truncate=true).Z
 
