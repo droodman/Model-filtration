@@ -3,6 +3,7 @@ using Random, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature
 const Z̄ = 1.9599639845401
 
 @inline diffcdf(N,b,a) = cdf(N,b) - cdf(N,a)
+@inline diffpdf(N,b,a) = pdf(N,b) - pdf(N,a)
 
 import Base.rand, Distributions.pdf, Distributions.logpdf, Distributions.cdf, Distributions.logcdf, Distributions.ccdf, Distributions.logccdf, Statistics.quantile
 
@@ -65,10 +66,9 @@ end
 
 # unlogged likelihood for a single observation. For graphs.
 function HnFl(z; p::Vector, μ::Vector, τ::Vector, pF₀, pL₀, pU₀, kL=0, kU=0, m=1, truncate=true)
-	pL = pL₀ * exp(-kL*(Z̄+z))
-	pU = pU₀ * exp(-kU*(Z̄-z))
-	pF = pF₀ * (1 - pL - pU)
-	pD = 1 - pL - pU - pF
+	Z̄L	= min(Z̄, 1/kL-Z̄)
+	Z̄U	= min(Z̄, 1/kU-Z̄)
+	pD₀ = 1 - pF₀
 	length(p) < length(μ) && (p = [p; 1-sum(p)])
 	σ² = 1 .+ τ.^2
 	𝒩  = Normal()
@@ -77,21 +77,21 @@ function HnFl(z; p::Vector, μ::Vector, τ::Vector, pF₀, pL₀, pU₀, kL=0, k
 	if abs(z) ≥ Z̄
 		result = 0.
 		@inbounds for (pᵢ,𝒩μᵢ,𝒩ωᵢ) ∈ zip(p,𝒩μ,𝒩ω)
-			if z < 0.
-				result += pᵢ * pdf(𝒩μᵢ, z) * (1 + m * pL₀ * exp(kL*(kL/2-Z̄)) * quadgk(ω -> (a = pdf(𝒩ωᵢ,ω) * exp(-kL*ω) * diffcdf(𝒩, Z̄-ω+kL, -Z̄-ω+kL) * ccdf(𝒩,z-ω)^(m-1) / (1-ccdf(𝒩, -Z̄-ω)^m);
-																																		                 isnan(a) || isinf(a) ? 0. : a), 
-																                                               -Inf, Inf)[1])
+			if z < 0
+				result += pᵢ * pdf(𝒩μᵢ, z) * (1 + m * pL₀ * quadgk(ω -> (a = pdf(𝒩ωᵢ,ω) * ((1-kL*(Z̄+ω))*diffcdf(𝒩,Z̄L-ω,-Z̄-ω) + kL*diffpdf(𝒩,Z̄L-ω,-Z̄-ω)) * ccdf(𝒩,z-ω)^(m-1) / (1-ccdf(𝒩,-Z̄-ω)^m);
+																										              isnan(a) || isinf(a) ? 0. : a), 
+																                            -Inf, Inf)[1])
 			else
-				result += pᵢ * pdf(𝒩μᵢ, z) * (1 + m * pU₀ * exp(kU*(kU/2-Z̄)) * quadgk(ω -> (a = pdf(𝒩ωᵢ,ω) * exp( kU*ω) * diffcdf(𝒩, Z̄-ω-kU, -Z̄-ω-kU) * cdf(𝒩,z-ω)^(m-1) / (1 - cdf(𝒩,  Z̄-ω)^m);
-																																		                 isnan(a) || isinf(a) ? 0. : a), 
-																                                               -Inf, Inf)[1])
+				result += pᵢ * pdf(𝒩μᵢ, z) * (1 + m * pU₀ * quadgk(ω -> (a = pdf(𝒩ωᵢ,ω) * ((1-kU*(Z̄-ω))*diffcdf(𝒩,Z̄-ω,-Z̄U-ω) - kU*diffpdf(𝒩,Z̄-ω,-Z̄U-ω)) * cdf(𝒩,z-ω)^(m-1) / (1 - cdf(𝒩, Z̄-ω)^m);
+																										              isnan(a) || isinf(a) ? 0. : a), 
+																                            -Inf, Inf)[1])
 			end
 		end
 	else
-		result = pD * dot(p, pdf.(𝒩μ, z))
+		result = dot(p, pdf.(𝒩μ, z)) * pD₀ * (1 - pL₀ * max(0, 1-kL*(Z̄+z)) - pU₀ * max(0, 1-kU*(Z̄-z)))
 	end
-	truncate && (result /= 1 - pF₀ * dot(p, @. (diffcdf(𝒩μ, Z̄, -Z̄) - pL₀ * exp(kL*(σ²*kL/2-μ-Z̄)) * diffcdf(𝒩μ,  σ²*kL+Z̄,  σ²*kL-Z̄)
-	                                                                - pU₀ * exp(kU*(σ²*kU/2+μ-Z̄)) * diffcdf(𝒩μ, -σ²*kU+Z̄, -σ²*kU-Z̄)  )))
+	truncate && (result /= 1 - pF₀ * dot(p, @. diffcdf(𝒩μ,Z̄,-Z̄) - pL₀ * ((1-kL*(Z̄+μ)) * diffcdf(𝒩μ,Z̄L,-Z̄) + kL * σ² * diffpdf(𝒩μ,Z̄L,-Z̄)) - 
+	                                                               pU₀ * ((1-kU*(Z̄-μ)) * diffcdf(𝒩μ,Z̄,-Z̄U) + kU * σ² * diffpdf(𝒩μ,Z̄,-Z̄U))   ))
 	result
 end
 
@@ -262,13 +262,13 @@ function HnFDGP(N; p::Vector, μ::Vector, τ::Vector, pF₀, pL₀, pU₀, kL=0,
 	Ω = isnan(ω) ? map(i->rand(Normal(μ[i], τ[i])), I) : fill(ω,N)
 	Z✻ = rand.(Normal.(Ω))
 	Z = similar(Z✻)
-	@inbounds #=Threads.@threads=# for i ∈ eachindex(Z✻)
+	@inbounds Threads.@threads for i ∈ eachindex(Z✻)
 		Z✻ᵢ = Z✻[i]
 		if abs(Z✻ᵢ) > Z̄
 			Z[i] = Z✻ᵢ  # publish significant result as is
 		else
-			pL = pL₀ * exp(-kL*(Z̄+Z✻ᵢ))  # probability of hacking to lower tail
-			pU = pU₀ * exp(-kU*(Z̄-Z✻ᵢ))  # probability of hacking to upper tail
+			pL = pL₀ * max(0, 1-kL*(Z̄ + Z✻ᵢ))
+			pU = pU₀ * max(0, 1-kU*(Z̄ - Z✻ᵢ))
 			pF = pF₀ * (1 - pL - pU)
 			pD = 1 - pL - pU - pF
 			r = rand()
@@ -306,21 +306,13 @@ p = [1.]
 τ = [2.]
 m = 5.
 
-ω = .7
-zplot = -10:.1:10
-z = HnFDGP(3_000_000; p, μ, τ, pF₀, pL₀, pU₀, kL, kU, m, truncate=true, ω).Z
-histogram(z, normalize=:pdf)
-pplot = map(z->fZcondΩ(z, ω; pF₀, pL₀, pU₀, kL, kU, m, truncate=true), zplot)
-plot!(zplot, pplot)
-sum(pplot)/10
-
 z = HnFDGP(3_000_000; p, μ, τ, pF₀, pL₀, pU₀, kL, kU, m, truncate=true).Z
 
 histogram(z, normalize=:pdf, legend=false)
 zplot = -10:.1:10
-pplot = map(z->.01+HnFl(z; p, μ, τ, pF₀, pL₀, pU₀, kL, kU, m, truncate=true), zplot)
+pplot = map(z->HnFl(z; p, μ, τ, pF₀, pL₀, pU₀, kL, kU, m, truncate=true), zplot)
 plot!(zplot, pplot)
-plot!(zplot, map(z->.02+exp(-negHnFll(HnFstuff([z], D=length(μ), interpres=300, quadnodes=25))(vcat(SimplextoRⁿ(p),μ,log.(τ),logit(pF₀),logit(pL₀),logit(pU₀),log(kL),log(kU),log(m)))),zplot))
+plot!(zplot, map(z->exp(-negHnFll(HnFstuff([z], D=length(μ), interpres=300, quadnodes=25))(vcat(SimplextoRⁿ(p),μ,log.(τ),logit(pF₀),logit(pL₀),logit(pU₀),log(kL),log(kU),log(m)))),zplot))
 
 o = HnFstuff(z, D=length(μ), interpres=300, quadnodes=25)
 @time res = optimize(negHnFll(o), vcat(SimplextoRⁿ(p),μ,log.(τ),logit(pF₀),logit(pL₀),logit(pU₀),log(kL),log(kU),log(m)), LBFGS(), autodiff=:forward)
