@@ -5,7 +5,7 @@ The model is fit with (penalized) maximum likelihood to large data sets of _z_ s
 The program produces output like this ("true z" = signal-to-noise ratio):
 <img width="799" alt="image" src="https://github.com/droodman/Model-filtration/blob/main/output/GW2%20all.png" />
 
-# Micro model schematic
+# Micro-model schematic
 <img width="799" height="758" alt="image" src="https://github.com/user-attachments/assets/f30b982b-b097-4cb2-9115-dd613f21f6ee" />
 
 # Mathematical statement of likelihood :-)
