@@ -472,7 +472,7 @@ Base.repr(render::AbstractRenderType, x::Converged; args...) = RegressionTables.
 function HnFfit(z::Vector; d::Int=1, interpres::Int=0, Nquad::Int=50, method::Optim.AbstractOptimizer=NewtonTrustRegion(), from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
 									estname="", modelabsz::Bool=false, penalty::Function=(; kwargs...)->0., kwargs...)
 
-	println("\Modeling $estname data with $d Gaussian mixture components")
+	println("\nModeling $estname data with $d Gaussian mixture components")
 	
 	# set starting values & parameter transformes, allowing caller to override defaults
 	from  = merge((p=fill(1/d,d), μ=fill(0.,d), τ=collect(LinRange(1,d,d)), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        ),  from)
@@ -660,6 +660,7 @@ f |> display
 #
 
 @time begin
+	# penalty function for parameters that can generate singularities
   penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(m[])) + logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
 
 	# van Zwet, Schwab, and Senn (2021) data, https://osf.io/xq4b2
@@ -737,7 +738,7 @@ f |> display
 	GM = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, GM; title="Gerber & Malhotra (2008) data")
 
-	regtable(GW, Setal, GM, SW, BCH, ABetal, vZSS, V;
+	table = regtable(GW, Setal, GM, SW, BCH, ABetal, vZSS, V;
 							estim_decoration = (coef,p)->coef,  # no stars
 							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
