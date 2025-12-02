@@ -12,7 +12,7 @@ const z̄ = 1.9599639845401
 const 𝒩 = Normal()
 
 @inline diffcdf(N,b,a) = cdf(N,b) - cdf(N,a)
-@inline sqrt0(x) = x<0 ? zero(typeof(x)) : sqrt(x)
+@inline sqrt0(x::T) where {T} = x<0 ? zero(T) : sqrt(x)
 
 
 # to parameterize an n-vector of probabilities summing to 1 with an unbounded (n-1)-vector, apply logistic transform to latter, then map to squared spherical coordinates
