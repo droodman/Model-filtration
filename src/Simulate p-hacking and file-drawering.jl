@@ -472,6 +472,8 @@ Base.repr(render::AbstractRenderType, x::Converged; args...) = RegressionTables.
 function HnFfit(z::Vector; d::Int=1, interpres::Int=0, Nquad::Int=50, method::Optim.AbstractOptimizer=NewtonTrustRegion(), from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
 									estname="", modelabsz::Bool=false, penalty::Function=(; kwargs...)->0., kwargs...)
 
+	println("\Modeling $estname data with $d Gaussian mixture components")
+	
 	# set starting values & parameter transformes, allowing caller to override defaults
 	from  = merge((p=fill(1/d,d), μ=fill(0.,d), τ=collect(LinRange(1,d,d)), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        ),  from)
   xform = merge((p=SimplextoRⁿ, μ=shared[d] , τ=bcast(log)              , pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m)), xform)
@@ -523,7 +525,7 @@ function HnFplot(z, est; zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen
 	f = Figure(size=(1500,900))
 
 	# empirical distribution of z's + model fit
-	CairoMakie.Axis(f[1,1], xlabel="z", ylabel="Density")
+	Axis(f[1,1], xlabel="z", ylabel="Density")
 	hist!(z, normalization=:pdf, bins=floor(Int,√size(z,1)), label="Actual published effects", color=(:slategray,.4))  # outline histogram of data
 
 	s,e = extrema(z); _zplot = s:.01:e
@@ -612,9 +614,12 @@ function HnFplot(z, est; zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen
 end
 
 
+#
 # confirm match between model and simulation
+#
+
 p = [.7,.3]
-μ = [0.,0.]
+μ = [0.7,0.7]
 τ = [1.2,1.7]
 pD = .25
 pF = .25
@@ -625,23 +630,46 @@ m = [5.]
 d = length(p)
 modelabsz=false
 pDFHR=[pD, pF, pH, pR]
-kwargs = (p=p, μ=μ, τ=τ, pDFHR=pDFHR, σ=σ, m=m)
-zplot = collect((modelabsz ? 0 : -10):.01:10)
+kwargs = (p=p, μ=μ, τ=τ, pDFHR=pDFHR, σ=σ, m=m, modelabsz=modelabsz)
+
 Random.seed!(1232)
-sim = HnFDGP(1_000_00; kwargs..., modelabsz)
-f = hist(sim.z✻, bins=1000, normalization=:pdf)
-lines!(zplot, fZ(zplot; kwargs..., modelabsz), color=:orange)
+sim = HnFDGP(1_000_00; kwargs...)
+
+f = Figure()
+Axis(f[1,1])
+hist!(sim.z✻, bins=1000, normalization=:pdf)
+zplot = (modelabsz ? 0 : -10):.01:10
+lines!(zplot, fZ(zplot; kwargs...), color=:orange, label="True parameters")
+
 penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(m[])) + logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
-res = HnFfit(sim.z✻; d, modelabsz, penalty, extended_trace=false);
+res = HnFfit(sim.z✻; d, modelabsz, penalty, estname="simulated", extended_trace=false)  # penalized maximum likelihood
 print(res.coefdict)
-lines!(zplot, fZ(zplot; modelabsz, res.coefdict...), color=:green)
+lines!(zplot, fZ(zplot; modelabsz, res.coefdict...), color=:green, label="Estimated parameters")
+
+f[0, :] = Label(f, "Simulation vs model")
+axislegend(position=:lt, framevisible = false)
+colsize!(f.layout, 1, Relative(1))
 f |> display
 
 # M = HnFmodel(sim.z✻; d, modelabsz, p=SimplextoRⁿ, μ=shared[d], τ=bcast(log), pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m))
 # HnFll(M, p, μ, τ, pDFHR, σ, m)
 
+
+#
+# model real data
+#
+
 @time begin
   penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(m[])) + logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
+
+	# van Zwet, Schwab, and Senn (2021) data, https://osf.io/xq4b2
+	df = DataFrame(CSV.File("data/van Zwet, Schwab, and Senn 2021/CochraneEffects.csv"))
+	@. @subset!(df, abs(:z)<10 && :"outcome.nr"==1 && :RCT=="yes" && :"outcome.group"=="efficacy")  # vZSS used 20 not 10
+	Random.seed!(29384)
+	df = combine(groupby(df, :"study.id.sha1"), :z => sample => :z)  # randomly choose among primary outcomes
+  results = [HnFfit(df.z; d, penalty, estname="vZZS$d") for d ∈ 1:3]
+	vZSS = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
+	HnFplot(df.z, vZSS; title="van Zwet, Schwab, and Senn (2021) data")
 
 	# Georgescu and Wren 2018 ~1M sample, doi:10.1093/bioinformatics/btx811, https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData
 	df = DataFrame(RData.load("data/Georgescu and Wren 2018/Georgescu.Wren.RData")["complete"])
@@ -649,7 +677,7 @@ f |> display
 	@. df.z = log(df.mean) / (ifelse(ismissing(df.lower) || iszero(df.lower), log(df.upper / df.mean), log(df.upper / df.lower) / 2) / cquantile(𝒩, (1 - df.ci_level)/2))
 	@. @subset!(df, !ismissing(:z) && !ismissing(:lower) && iszero(:mistake) && abs(:z) < 10.)  # van Zwet & Cator Figure 1 stops at 10
 	# @. @subset!(df, :source!="Abstract")
-	results = [HnFfit(df.z; d, penalty, interpres=1000,                         ) for d ∈ 1:3]
+	results = [HnFfit(df.z; d, penalty, interpres=1000          , estname="GW$d") for d ∈ 1:3]
 	results = [HnFfit(df.z; d, penalty, from=results[d].coefdict, estname="GW$d") for d ∈ 1:3]
 	GW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
 	HnFplot(df.z, GW; title="Georgescu and Wren (2018) data")
@@ -663,15 +691,6 @@ f |> display
 	results = [HnFfit(df.z; d, penalty, estname="Setal$d") for d ∈ 1:3]
 	Setal = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, Setal; title="Schuemie et al. (2013) data")
-
-	# van Zwet, Schwab, and Senn (2021) data, https://osf.io/xq4b2
-	df = DataFrame(CSV.File("data/van Zwet, Schwab, and Senn 2021/CochraneEffects.csv"))
-	@. @subset!(df, abs(:z)<10 && :"outcome.nr"==1 && :RCT=="yes" && :"outcome.group"=="efficacy")  # vZSS used 20 not 10
-	Random.seed!(29384)
-	df = combine(groupby(df, :"study.id.sha1"), :z => sample => :z)  # randomly choose among primary outcomes
-  results = [HnFfit(df.z; d, penalty, estname="vZZS$d") for d ∈ 1:3]
-	vZSS = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
-	HnFplot(df.z, vZSS; title="van Zwet, Schwab, and Senn (2021) data")
 
 	# Star Wars, doi.org/10.1257/app.20150044, openicpsr.org/openicpsr/project/113633/version/V1/view?path=/openicpsr/113633/fcr:versions/V1/brodeur_le_sangnier_zylberberg_replication/Data/Final/final_stars_supp.dta&type=file
 	df = DataFrame(CSV.File("data/Brodeur et al. 2016/final_stars_supp.csv"))
