@@ -1,8 +1,12 @@
-using Pkg
-Pkg.activate(".")
-Pkg.instantiate()
+cd(dirname(@__FILE__))
+cd("..")
 
-using Random, IrrationalConstants, Format, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature, Optim, LogExpFunctions, CSV, DataFrames, DataFramesMeta, ForwardDiff, LinearAlgebra, Roots, QuadGK, Statistics, InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData
+using Pkg
+Pkg.activate(".")  # activate this project's environment
+Pkg.instantiate()  # make sure all packages installed
+
+using Random, IrrationalConstants, Format, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature, Optim, LogExpFunctions, CSV, DataFrames, DataFramesMeta, ForwardDiff, LinearAlgebra, Roots, QuadGK, Statistics, 
+       InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData
 
 const z̄ = 1.9599639845401
 const 𝒩 = Normal()
