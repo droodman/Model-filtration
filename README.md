@@ -2,7 +2,7 @@ This is the repo for an ongoing project to model how file-drawering/publication 
 
 The model is fit with (penalized) maximum likelihood to large data sets of _z_ statistics from ~8 different studies. It is implemented in Julia. Running it should only require [installing Julia](https://julialang.org/downloads), launching Julia, downloading and unzipping this archive, and `include("path/to/archive/src/Model publication distortion.jl")`.
 
-The program produces output like this:
+The program produces output like this ("true z" = signal-to-noise ratio):
 <img width="799" alt="image" src="https://github.com/droodman/Model-filtration/blob/main/output/GW2%20all.png" />
 
 # Micro model schematic
