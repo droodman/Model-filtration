@@ -8,7 +8,8 @@ The program produces output like this ("true z" = signal-to-noise ratio):
 # Model
 <img width="792" height="714" alt="image" src="https://github.com/user-attachments/assets/fd235128-7982-4fa8-8926-9249f1cdf6a9" />
 
-# Mathematical statement of likelihood
-<img width="1126" height="334" alt="image" src="https://github.com/user-attachments/assets/0da2a007-8e68-42f7-8d1b-f5b9702d0cd2" />
+# Likelihood
+<img width="1125" height="333" alt="image" src="https://github.com/user-attachments/assets/607b827b-a033-4c74-8aec-f5702396a67b" />
+
 
 
