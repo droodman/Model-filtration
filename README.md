@@ -8,7 +8,7 @@ The program produces output like this ("true z" = signal-to-noise ratio):
 # Micro-model schematic
 <img width="799" height="758" alt="image" src="https://github.com/user-attachments/assets/f30b982b-b097-4cb2-9115-dd613f21f6ee" />
 
-# Mathematical statement of likelihood :-)
-<img width="1115" height="169" alt="image" src="https://github.com/user-attachments/assets/208ab23a-871a-46a2-b59e-7b39c317f537" />
+# Mathematical statement of likelihood
+<img width="1126" height="334" alt="image" src="https://github.com/user-attachments/assets/0da2a007-8e68-42f7-8d1b-f5b9702d0cd2" />
 
 
