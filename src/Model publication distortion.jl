@@ -407,7 +407,6 @@ end
 	se::Vector{Float64} = sqrt0.(diag(vcov))
 	z::Vector{Float64} = coef ./ se
 	𝒩::Vector{Union{Missing, Normal{Float64}}} = [isnan(s) ? missing : Normal(c,s) for (c,s) ∈ zip(coef,se)]
-  file_drawer::Float64
 end
 
 
@@ -452,10 +451,6 @@ RegressionTables.default_print_control_indicator(x::AbstractRenderType) = false
 struct Converged <: RegressionTables.AbstractRegressionStatistic val::Union{Bool, Nothing} end
 Converged(m::HnFresult) = Converged(m.converged)
 RegressionTables.label(render::AbstractRenderType, x::Type{Converged}) = "Converged"
-
-struct File_drawered <: RegressionTables.AbstractRegressionStatistic val::Union{Float64, Nothing} end
-File_drawered(m::HnFresult) = File_drawered(m.file_drawer)
-RegressionTables.label(render::AbstractRenderType, x::Type{File_drawered}) = "File-drawered fraction"
 
 Base.repr(render::AbstractRenderType, x::LogLikelihood; args...) = format(RegressionTables.value(x); commas=true, precision=0) # https://github.com/jmboehm/RegressionTables.jl/issues/160#issuecomment-2139998831
 Base.repr(render::AbstractRenderType, x::BIC; args...) = format(RegressionTables.value(x); commas=true, precision=0) # https://github.com/jmboehm/RegressionTables.jl/issues/160#issuecomment-2139998831
@@ -526,7 +521,7 @@ function HnFfit(z::Vector; d::Int=1, interpres::Int=0, Nquad::Int=50, method::Op
 										 "fraction_published_insignificant_p_hacked", "fraction_significant_p_hacked")
 
 	G = _HnFll(M; coefdict...)[2]
-	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), ll = -Optim.minimum(res), file_drawer=coefdict[:pDFHR][2]*G)
+	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), ll = -Optim.minimum(res))
 end
 
 function HnFplot(z, est; zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
@@ -773,7 +768,7 @@ f |> display
 
 	table = regtable(GW, Setal, GM, SW, BCH, ABetal, vZSS, V;
 							estim_decoration = (coef,p)->coef,  # no stars
-							regression_statistics = [Nobs, File_drawered #=, Converged, LogLikelihood, BIC=#],
+							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
 							keep = ["p₁", "p₂", "p₃", "p₄", "μ₁", "τ₁", "τ₂", "τ₃", "τ₄", "pF", "pH", "pD", "pR", "σ", "m", "fraction_insignificant_file_drawered", "fraction_insignificant_published_as_is", "fraction_published_insignificant_p_hacked", "fraction_significant_p_hacked"],
 							estimformat = "%0.3g",
