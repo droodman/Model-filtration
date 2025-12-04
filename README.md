@@ -20,7 +20,7 @@ Each column is for a different data set of _z_ statistics:
 [Brodeur, Cook, and Heyes (2020)](https://openicpsr.org/openicpsr/project/120246/version/V1/view?path=/openicpsr/120246/fcr:versions/V1/MM-Data.dta&type=file),
 [Arel-Bundock et al. (forthcoming)](https://doi.org/10.1086/734279),
 [van Zwet, Schwab, and Senn (2021)](https://osf.io/xq4b2),
-[Vivalt (2020)](https://figshare.com/articles/dataset/Replication_files_for_How_Much_Can_We_Generalize_from_Impact_Evaluations_/12048600/1)
+[Vivalt (2020)](https://figshare.com/articles/dataset/Replication_files_for_How_Much_Can_We_Generalize_from_Impact_Evaluations_/12048600/1).
 ```
 -----------------------------------------------------------------------------------------------------------------------------------------------
                                                 GW2        Setal2        GM2          SW2         BCH2       ABetal2       vZZS2         V2    
