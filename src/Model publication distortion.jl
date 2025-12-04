@@ -132,8 +132,8 @@ fZcondΩ(z, ω; modelabsz=false, Nquad=50, pDFHR, σ, m, truncate=true) = _fZcon
 # If truncate=true (default), returns the truncated density, i.e., conditional on publication
 function fZ(z; modelabsz=false, Nquad=50, p, μ, τ, pDFHR, σ, m, truncate=true)
   M = HnFmodel(z; d=length(τ), Nquad, modelabsz)
-  ∫, file_drawer = _HnFll(M; p,μ,τ,pDFHR,σ,m)
-  truncate && (∫ ./= 1 - file_drawer)
+  ∫, G = _HnFll(M; p,μ,τ,pDFHR,σ,m)
+  truncate && (∫ ./= 1 - pDFHR[2]*G)
   ∫
 end
 
@@ -246,14 +246,14 @@ import Base.==
 # Hack'n'file log likelihood
 #
 
-# This core function does everything but taking logs of obs-level likelihoods, optionally interpolating, and dividing by 1-file-drawered mass
+# Compute observation-level likelihood (not log likelihood) and expected number of publish/file-drawer/p-hack decision junctures (G)
 function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::AbstractVector{T}, pDFHR::AbstractVector{T}, σ::Vector{T}, m::Vector{T}) where {T}
-  pD, pF, pH, pR = pDFHR
+  pD, _, pH, pR = pDFHR
 	z̄divσ, zdivσ, Z₀divσ = z̄/σ[], M.kts/σ[], M.Z₀/σ[]
 
 	# pre-allocating these hampers automatic differentiation because they depend on T, which could be a Dual number
 	∫ = zeros(T,M.k)
-	file_drawer = zero(T)	# file-drawer mass accumulator
+	G = zero(T)	 # accumulator for expected number of publish/file-drawer/p-hack decision junctures
 	B = Vector{T}(undef,M.Nquad)  # pre-multiplied by p_H for later use in B calculation
   tot_hacking = Vector{T}(undef,M.k)
 
@@ -293,13 +293,13 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 	@inbounds for i ∈ 1:M.d
     𝒩μ = Normal(μ[i], √(1+τ[i]^2))
 
-    Pr_file_drawerᵢ = zero(T)
+    Gᵢ = zero(T)
     for k ∈ 1:M.Nquad
       t = exp(E[k] + logpdf(𝒩μ, M.Z₀[k])) 
-      Pr_file_drawerᵢ += t
+      Gᵢ += t
 		  B[k] = pHσm * t
     end
-    file_drawer += p[i] * Pr_file_drawerᵢ
+    G += p[i] * Gᵢ
 
 		Threads.@threads for j ∈ 1:M.k  # for each z value/interpolation point
 			@inbounds begin
@@ -321,15 +321,15 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 			end
 		end
 	end
-  ∫, pF*file_drawer
+  ∫, G
 end
 
 function HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::AbstractVector{T}, pDFHR::AbstractVector{T}, σ::Vector{T}, m::Vector{T}) where {T}
-  ∫, file_drawer = _HnFll(M; p,μ,τ,pDFHR,σ,m)
+  ∫, G = _HnFll(M; p,μ,τ,pDFHR,σ,m)
 	Threads.@threads for j ∈ 1:M.k
 		@inbounds ∫[j] = log(∫[j])
 	end
-	sum(M.interpolate ? interpolate!(∫, BSpline(Cubic())).(M.zint) : ∫) - xlog1py(M.N, -file_drawer) + M.penalty(; p, μ, τ, pDFHR, σ, m)
+	sum(M.interpolate ? interpolate!(∫, BSpline(Cubic())).(M.zint) : ∫) - xlog1py(M.N, -pDFHR[2]*G) + M.penalty(; p, μ, τ, pDFHR, σ, m)
 end
 
 
@@ -392,7 +392,7 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 	(ω=ω, z₀=z₀, z✻=z✻)
 end
 
-struct HnFresult<:RegressionModel
+@kwdef struct HnFresult<:RegressionModel
 	estname::String
 	modelabsz::Bool
 	converged::Bool
@@ -403,18 +403,11 @@ struct HnFresult<:RegressionModel
 	k::Int
 	n::Int
 	ll::Float64
-	BIC::Float64
-	se::Vector{Float64}
-	z::Vector{Float64}
-	𝒩::Vector{Union{Missing, Normal{Float64}}}
+	BIC::Float64 =  k*log(n)-2ll
+	se::Vector{Float64} = sqrt0.(diag(vcov))
+	z::Vector{Float64} = coef ./ se
+	𝒩::Vector{Union{Missing, Normal{Float64}}} = [isnan(s) ? missing : Normal(c,s) for (c,s) ∈ zip(coef,se)]
   file_drawer::Float64
-
-	function HnFresult(estname, modelabsz, converged, b, coefnames, coef, vcov, k, n, ll, file_drawer)
-	  se = sqrt0.(diag(vcov))
-		view(vcov, diagind(vcov)) |> t -> t[t.<0] .= 0  # zero out negative diagonal entries
-		new(estname, modelabsz, converged, b, coefnames, coef, vcov, k, n, ll, k*log(n)-2ll, se, coef ./ se, 
-		    [isnan(s) ? missing : Normal(c,s) for (c,s) ∈ zip(coef,se)], file_drawer)
-	end
 end
 
 
@@ -456,11 +449,13 @@ RegressionTables._responsename(x::HnFresult) = StatsAPI.responsename(x)
 RegressionTables._coefnames(x::HnFresult) = coefnames(x)
 RegressionTables.default_print_control_indicator(x::AbstractRenderType) = false
 
-struct Converged <: RegressionTables.AbstractRegressionStatistic
-    val::Union{Bool, Nothing}
-end
+struct Converged <: RegressionTables.AbstractRegressionStatistic val::Union{Bool, Nothing} end
 Converged(m::HnFresult) = Converged(m.converged)
 RegressionTables.label(render::AbstractRenderType, x::Type{Converged}) = "Converged"
+
+struct File_drawered <: RegressionTables.AbstractRegressionStatistic val::Union{Float64, Nothing} end
+File_drawered(m::HnFresult) = File_drawered(m.file_drawer)
+RegressionTables.label(render::AbstractRenderType, x::Type{File_drawered}) = "File-drawered fraction"
 
 Base.repr(render::AbstractRenderType, x::LogLikelihood; args...) = format(RegressionTables.value(x); commas=true, precision=0) # https://github.com/jmboehm/RegressionTables.jl/issues/160#issuecomment-2139998831
 Base.repr(render::AbstractRenderType, x::BIC; args...) = format(RegressionTables.value(x); commas=true, precision=0) # https://github.com/jmboehm/RegressionTables.jl/issues/160#issuecomment-2139998831
@@ -472,7 +467,7 @@ Base.repr(render::AbstractRenderType, x::Converged; args...) = RegressionTables.
 function HnFfit(z::Vector; d::Int=1, interpres::Int=0, Nquad::Int=50, method::Optim.AbstractOptimizer=NewtonTrustRegion(), from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
 									estname="", modelabsz::Bool=false, penalty::Function=(; kwargs...)->0., kwargs...)
 
-	println("\nModeling $estname data with $d Gaussian mixture components")
+	println("\nModeling $estname data with $d Gaussian mixture component(s)")
 	
 	# set starting values & parameter transformes, allowing caller to override defaults
 	from  = merge((p=fill(1/d,d), μ=fill(0.,d), τ=collect(LinRange(1,d,d)), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        ),  from)
@@ -492,12 +487,31 @@ function HnFfit(z::Vector; d::Int=1, interpres::Int=0, Nquad::Int=50, method::Op
 	res = Optim.optimize(objective, vcat(fromxform...), method, Optim.Options(; merge((iterations=100, show_trace=true), kwargs)...), autodiff=:forward)
 	θ = Optim.minimizer(res)
 	invxform = θ -> [θ[e] |> inverse(xform[p]) for (p,e) ∈ extractor]
-	b = NamedTuple([p=>θᵢ for ((p,e),θᵢ) ∈ zip(extractor,invxform(θ))])
+	coefdict_maker(v) = NamedTuple(p=>inverse(xform[p])(v[e]) for (p,e) ∈ extractor)
+	coefdict = coefdict_maker(θ)
 
-	Δ = ForwardDiff.jacobian(v->vcat(invxform(v)...), θ)  # Jacobian of full model parameters wrt optimization parameters
+	function derived_stats(; p, μ, τ, pDFHR, σ, m)
+		pD, pF, pH, pR = pDFHR
+
+		G = _HnFll(HnFmodel([0.]; d); p,μ,τ,pDFHR,σ,m)[2]
+		I₀ = dot(p, diffcdf.(Normal.(μ,.√(1 .+τ.^2)), z̄, -z̄)) 	# fraction initially insignificant
+
+		[
+			pF*G / I₀                     # fraction of insignificant studies file-drawered
+			pF*G                          # fraction of all studies file-drawered
+			pR*G / I₀ + pD                # fraction of insignificant published as is
+			1 - (1-pH)*G/I₀               # fraction of initially insignificant that lead to published, significant, p-hacked results
+			pD * (G/I₀ - 1)               # fraction of initially insignificant that lead to published, insignificant, p-hacked results
+
+			(I₀ - (1-pH)*G) / (1 - pF*G)  # fraction of significant results that are p-hacked
+			pD * (G - I₀) / (1 - pF*G)    # fraction of insignificant results that are p-hacked
+		]
+	end
+
+	Δ = ForwardDiff.jacobian(v->vcat(invxform(v)..., derived_stats(;coefdict_maker(v)...)), θ)  # Jacobian of full model parameters & derived stats wrt optimization parameters
 	H = ForwardDiff.hessian(objective, θ)  # Hessian of log likelihood wrt optimization parameters
 	Vxform = try pinv(H) catch _ fill(NaN, size(H)) end  # covariance matrix of optimization parameters
-	V = Δ * Vxform * Δ'  # covariance matrix of full model parameters
+	vcov = Δ * Vxform * Δ'  # covariance matrix of full model parameters
 
 	# se = NamedTuple([p=> iszero(length(e)) ? zeros(length(inverse(xform[p])(θ[e]))) :
 	# 											(e isa Int ? ForwardDiff.derivative : ForwardDiff.jacobian)(inverse(xform[p]), θ[e]) |>
@@ -507,13 +521,12 @@ function HnFfit(z::Vector; d::Int=1, interpres::Int=0, Nquad::Int=50, method::Op
 	converged = Optim.converged(res)
 
 	one2D = first(Unicode.graphemes("₁₂₃₄"),d)
-	coefnames = vcat("p".*one2D, 
-	                  modelabsz & false ? String[] : from.μ isa Number ? "μ" : "μ".*one2D, 
-									  "τ".*one2D, "pD", "pF", "pH", "pR", "σ", "m")
+	coefnames = vcat("p".*one2D, "μ".*one2D, "τ".*one2D, "pD", "pF", "pH", "pR", "σ", "m", "fraction_insignificant_file_drawered", "overall_file_drawer_fraction", 
+										 "fraction_insignificant_published_as_is", "significant_p_hacked_fraction", "insignificant_p_hacked_fraction",
+										 "fraction_published_insignificant_p_hacked", "fraction_significant_p_hacked")
 
-	ll = -Optim.minimum(res)
-  file_drawer = _HnFll(M; b...)[2]
-	HnFresult(estname, modelabsz, converged, b, coefnames, vcat(b...), V, length(θ), size(z,1), ll, file_drawer)
+	G = _HnFll(M; coefdict...)[2]
+	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), ll = -Optim.minimum(res), file_drawer=coefdict[:pDFHR][2]*G)
 end
 
 function HnFplot(z, est; zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
@@ -621,10 +634,10 @@ end
 p = [.7,.3]
 μ = [0.7,0.7]
 τ = [1.2,1.7]
-pD = .25
-pF = .25
-pH = .25
-pR = .25
+pD = .4
+pF = .3
+pH = .2
+pR = .1
 σ = [.2]
 m = [5.]
 d = length(p)
@@ -632,8 +645,9 @@ modelabsz=false
 pDFHR=[pD, pF, pH, pR]
 kwargs = (p=p, μ=μ, τ=τ, pDFHR=pDFHR, σ=σ, m=m, modelabsz=modelabsz)
 
+n = 100_000
 Random.seed!(1232)
-sim = HnFDGP(1_000_00; kwargs...)
+sim = HnFDGP(n; kwargs...)
 
 f = Figure()
 Axis(f[1,1])
@@ -654,6 +668,25 @@ f |> display
 # M = HnFmodel(sim.z✻; d, modelabsz, p=SimplextoRⁿ, μ=shared[d], τ=bcast(log), pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m))
 # HnFll(M, p, μ, τ, pDFHR, σ, m)
 
+
+# checks
+# p,μ,τ,pDFHR,σ,m = res.coefdict.p, res.coefdict.μ, res.coefdict.τ, res.coefdict.pDFHR, res.coefdict.σ, round.(res.coefdict.m)
+# G = _HnFll(HnFmodel([0.]; d=length(p)); p,μ,τ,pDFHR,σ,m)[2]
+# sim = HnFDGP(n; p,μ,τ,pDFHR,σ,m)
+# pD, pF, pH, pR = pDFHR
+
+# # Latent: fraction of insignificant results terminating in each of the boxes
+# n✻ = length(sim.z✻)  # number of published studies
+# I₀, Ĩ₀ = dot(p, diffcdf.(Normal.(μ,.√(1 .+τ.^2)),z̄,-z̄)), (n-n✻ + sum(@. abs(sim.z₀)<z̄))/n	# fraction initial insignificant
+# pF*G / I₀, (n-n✻)/(Ĩ₀*n)  # fraction of insignificant studies file-drawered
+# pF*G, (n-n✻)/n  # fraction of all studies file-drawered
+# pR*G / I₀ + pD, sum(@. sim.z✻==sim.z₀ && abs(sim.z₀)<z̄) / (Ĩ₀*n)  # fraction insignificant published as is
+# 1-pD - (1-pH-pD)*G/I₀, sum(@. sim.z✻!=sim.z₀) /(Ĩ₀*n)  # fraction insignificant p-hacked & published
+# 1 - (1-pH)*G/I₀, sum(@. sim.z✻!=sim.z₀ && abs(sim.z✻)>z̄) / (Ĩ₀*n)  # fraction of initial insignificant results that are successfully p-hacked
+# pD * (G - I₀)/I₀, sum(@. sim.z✻!=sim.z₀ && abs(sim.z✻)≤z̄) / (Ĩ₀*n)  # fraction of initial insignificant results that are p-hacked, fail to reach significance, and are published anyway
+
+# (I₀ - (1-pH)*G) / (1 - pF*G), sum(@. abs(sim.z✻)>z̄ && sim.z✻!=sim.z₀) / n✻  # fraction of significant results that are p-hacked
+# pD * (G - I₀) / (1 - pF*G), sum(@. abs(sim.z✻)≤z̄ && sim.z✻!=sim.z₀) / n✻  # fraction of insignificant results that are p-hacked
 
 #
 # model real data
@@ -740,9 +773,9 @@ f |> display
 
 	table = regtable(GW, Setal, GM, SW, BCH, ABetal, vZSS, V;
 							estim_decoration = (coef,p)->coef,  # no stars
-							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
+							regression_statistics = [Nobs, File_drawered #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
-							keep = ["p₁", "p₂", "p₃", "p₄", "μ₁", "τ₁", "τ₂", "τ₃", "τ₄", "pF", "pH", "pD", "pR", "σ", "m"],
+							keep = ["p₁", "p₂", "p₃", "p₄", "μ₁", "τ₁", "τ₂", "τ₃", "τ₄", "pF", "pH", "pD", "pR", "σ", "m", "fraction_insignificant_file_drawered", "fraction_insignificant_published_as_is", "fraction_published_insignificant_p_hacked", "fraction_significant_p_hacked"],
 							estimformat = "%0.3g",
 							statisticformat = "%0.3g",
 							number_regressions = false,
