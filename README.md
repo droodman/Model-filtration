@@ -13,13 +13,13 @@ The program produces output like this ("true z" = signal-to-noise ratio):
 
 # Numerical results
 Each column is for a different data set of _z_ statistics:
-[Georgescu and Wren (2018)](https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData)
-[Schuemie et al. (2013)](https://onlinelibrary.wiley.com/action/downloadSupplement?doi=10.1002%2Fsim.5925&file=Appendix+G+Revision.xlsx)
-[Gerber and Malhotra (2008)](https://www.nowpublishers.com/article/details/supplementary-info/100.00008024_supp.rar)
-[Brodeur et al. (2016)](https://openicpsr.org/openicpsr/project/113633/version/V1/view?path=/openicpsr/113633/fcr:versions/V1/brodeur_le_sangnier_zylberberg_replication/Data/Final/final_stars_supp.dta&type=file)
-[Brodeur, Cook, and Heyes (2020)](https://openicpsr.org/openicpsr/project/120246/version/V1/view?path=/openicpsr/120246/fcr:versions/V1/MM-Data.dta&type=file)
-[Arel-Bundock et al. (forthcoming)](https://doi.org/10.1086/734279)
-[van Zwet, Schwab, and Senn (2021)](https://osf.io/xq4b2)
+[Georgescu and Wren (2018)](https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData),
+[Schuemie et al. (2013)](https://onlinelibrary.wiley.com/action/downloadSupplement?doi=10.1002%2Fsim.5925&file=Appendix+G+Revision.xlsx),
+[Gerber and Malhotra (2008)](https://www.nowpublishers.com/article/details/supplementary-info/100.00008024_supp.rar),
+[Brodeur et al. (2016)](https://openicpsr.org/openicpsr/project/113633/version/V1/view?path=/openicpsr/113633/fcr:versions/V1/brodeur_le_sangnier_zylberberg_replication/Data/Final/final_stars_supp.dta&type=file),
+[Brodeur, Cook, and Heyes (2020)](https://openicpsr.org/openicpsr/project/120246/version/V1/view?path=/openicpsr/120246/fcr:versions/V1/MM-Data.dta&type=file),
+[Arel-Bundock et al. (forthcoming)](https://doi.org/10.1086/734279),
+[van Zwet, Schwab, and Senn (2021)](https://osf.io/xq4b2),
 [Vivalt (2020)](https://figshare.com/articles/dataset/Replication_files_for_How_Much_Can_We_Generalize_from_Impact_Evaluations_/12048600/1)
 ```
 -----------------------------------------------------------------------------------------------------------------------------------------------
