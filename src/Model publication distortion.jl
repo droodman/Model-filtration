@@ -41,7 +41,7 @@ InverseFunctions.inverse(::typeof(SimplextoRⁿ)) = RⁿtoSimplex
 
 # transform to constrain parameters
 get0(::Vector{T}) where {T} = T[]
-put0(::Vector{T}) where {T} = T[0]  # constant 1
+put0(::Vector{T}) where {T} = T[0]  # constant 0
 InverseFunctions.inverse(::typeof(get0)) = put0
 get1(::Vector{T}) where {T} = T[]
 put1(::Vector{T}) where {T} = T[1]  # constant 1
@@ -86,7 +86,7 @@ InverseFunctions.inverse(::typeof(log1m)) = expp1
 bcast = Broadcast.BroadcastFunction  # short-hand for forming the broadcasting version of a function, which works with InverseFunctions
 
 
-# compute f(z|ω) & F(file drawer|ω). Return as tuple
+# compute f(z|ω) & F(file drawer|ω). Return in provided 2-vector y
 function _fZcondΩ!(y, z, ω; modelabsz::Bool=false, Nquad::Int=50, pDFHR::Vector{T}, σ::Vector{T}, m::Vector{T}) where {T}
 	pD, _, pH, pR = pDFHR
   lnpH = log(pH)
@@ -128,15 +128,6 @@ _fZcondΩ(z, ω; kwargs...) = _fZcondΩ!(Vector{Float64}(undef,2), z, ω; kwargs
  # f(z|ω). If truncate=true (the default), returns the density conditional on publication
 fZcondΩ(z, ω; modelabsz=false, Nquad=50, pDFHR, σ, m, truncate=true) = _fZcondΩ(z, ω; modelabsz, Nquad, pDFHR, σ, m) |> (y -> truncate ? y[1]/(1 - pDFHR[2]*y[2]) : y[1])
  
-# likelihood for a collection (vector, step range) of z's for plotting
-# If truncate=true (default), returns the truncated density, i.e., conditional on publication
-function fZ(z; modelabsz=false, Nquad=50, p, μ, τ, pDFHR, σ, m, truncate=true)
-  M = HnFmodel(z; d=length(τ), Nquad, modelabsz)
-  ∫, G = _HnFll(M; p,μ,τ,pDFHR,σ,m)
-  truncate && (∫ ./= 1 - pDFHR[2]*G)
-  ∫
-end
-
 # the most time-consuming plotting is of the confidence intervals: for various values of ω, 
 # the cdf F(z|ω) is numerically calculated, many times--iteratively seeking where it hits, e.g., .025 and .975
 # to save time, pre-compute all components of f(z|ω) that do not depend on z, notably logdiffcdf(𝒩(0,σ), Z₀[k]+z̄, Z₀[k]-z̄)
@@ -191,6 +182,16 @@ end
 
 quantFcondΩ(q, ω; kwargs...) = find_zero(z -> q - FZcondΩ(z, ω; kwargs...), (-20,20), Roots.ITP())  # ITP algorithm works well
 
+# likelihood for a collection (vector, step range) of z's for plotting
+# If truncate=true (default), returns the truncated density, i.e., conditional on publication
+function fZ(z; modelabsz=false, Nquad=50, p, μ, τ, pDFHR, σ, m, truncate=true)
+  M = HnFmodel(z; d=length(τ), Nquad, modelabsz)
+  ∫, G = _HnFll(M; p,μ,τ,pDFHR,σ,m)
+  truncate && (∫ ./= 1 - pDFHR[2]*G)
+  ∫
+end
+
+
 # f(z), f(ω), f(ω|z), E[ω|z]
 # inconsistency: z should be a scalar for fΩcondZ but a vector or other iterable for EΩcondZ
 fΩ(ω; p, μ, τ) = dot(p,pdf.(Normal.(μ,τ), ω))
@@ -204,7 +205,6 @@ CI(    α, z; kwargs...) = Cquant(α/2, z; kwargs...), Cquant(1-α/2, z; kwargs.
 
 
 # object to hold pre-computed stuff for hack'n'file log likelihood computation
-# e.g., logit ∘ shared[4] extracts the first of a quartet of model parameters and applies logit; inverse applies logistic and fills out a quartet
 struct HnFmodel
 	modelabsz::Bool  # modeling |z|?
 	d::Int  # number of mixture components
@@ -254,7 +254,7 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 	# pre-allocating these hampers automatic differentiation because they depend on T, which could be a Dual number
 	∫ = zeros(T,M.k)
 	G = zero(T)	 # accumulator for expected number of publish/file-drawer/p-hack decision junctures
-	B = Vector{T}(undef,M.Nquad)  # pre-multiplied by p_H for later use in B calculation
+	B = Vector{T}(undef,M.Nquad)
   tot_hacking = Vector{T}(undef,M.k)
 
   if iszero(pH)
