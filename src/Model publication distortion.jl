@@ -15,6 +15,23 @@ const 𝒩 = Normal()
 @inline sqrt0(x::T) where {T} = x<0 ? zero(T) : sqrt(x)
 
 
+#
+# generalized t distribution: adds μ and σ parameters
+#
+struct GenT{T<:Real} <: ContinuousUnivariateDistribution
+	μ::T; σ::T; ν::T
+
+	lnσ::T
+	tdist::TDist{T}  # underlying Student's t distribution
+	GenT(μ::T, σ::T, ν::T) where {T<:Real} = new{T}(μ, σ, ν, log(σ), TDist{T}(ν))
+end
+Distributions.pdf(     d::GenT, x::Real) = pdf(     d.tdist, (x - d.μ) / d.σ) / d.σ
+Distributions.logpdf(  d::GenT, x::Real) = logpdf(  d.tdist, (x - d.μ) / d.σ) - d.lnσ
+Distributions.cdf(     d::GenT, x::Real) = cdf(     d.tdist, (x - d.μ) / d.σ)
+Distributions.logcdf(  d::GenT, x::Real) = logcdf(  d.tdist, (x - d.μ) / d.σ)
+Distributions.quantile(d::GenT, p::Real) = quantile(d.tdist, p) * d.σ + d.μ
+
+
 # to parameterize an n-vector of probabilities summing to 1 with an unbounded (n-1)-vector, apply logistic transform to latter, then map to squared spherical coordinates
 # https://en.wikipedia.org/wiki/N-sphere#Spherical_coordinates, https://math.stackexchange.com/questions/2861449/parameterizations-of-the-unit-simplex-in-mathbbr3
 function RⁿtoSimplex(q::AbstractVector{T}) where {T}
@@ -87,21 +104,21 @@ bcast = Broadcast.BroadcastFunction  # short-hand for forming the broadcasting v
 
 
 # compute f(z|ω) & F(file drawer|ω). Return in provided 2-vector y
-function _fZcondΩ!(y, z, ω; modelabsz::Bool=false, Nquad::Int=50, pDFHR::Vector{T}, σ::Vector{T}, m::Vector{T}) where {T}
+function _fZcondΩ!(y, z, ω; modelabsz::Bool=false, NLegendre::Int=50, pDFHR::Vector{T}, σ::Vector{T}, m::Vector{T}) where {T}
 	pD, _, pH, pR = pDFHR
   lnpH = log(pH)
 
-	Z₀, W = gausslegendre(Nquad)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
+	Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
 	Z₀ .*= z̄  # change of variables to quadrature over [-z̄, z̄]
-  lnW = log.(W) .+ log(z̄)
+  lnWLegendre = log.(W) .+ log(z̄)
 
 	zdivσ, z̄divσ = z/σ[], z̄/σ[]
 
   file_drawer = ∫ = 0.
 	b = zdivσ; absb = abs(b)
-	@inbounds for k ∈ 1:Nquad  # p-hacking; integrate out z₀ over [-z̄, z̄]
+	@inbounds for k ∈ 1:NLegendre  # p-hacking; integrate out z₀ over [-z̄, z̄]
 		a = Z₀[k] / σ[]
-    B = lnW[k] + logpdf(𝒩, Z₀[k]-ω) - log1mexp(lnpH + logdiffcdf(𝒩, a+z̄divσ, a-z̄divσ) * m[])
+    B = lnWLegendre[k] + logpdf(𝒩, Z₀[k]-ω) - log1mexp(lnpH + logdiffcdf(𝒩, a+z̄divσ, a-z̄divσ) * m[])
     file_drawer += exp(B) 
 
 		if a+absb ≉ a-absb
@@ -126,24 +143,24 @@ end
 _fZcondΩ(z, ω; kwargs...) = _fZcondΩ!(Vector{Float64}(undef,2), z, ω; kwargs...)
 
  # f(z|ω). If truncate=true (the default), returns the density conditional on publication
-fZcondΩ(z, ω; modelabsz=false, Nquad=50, pDFHR, σ, m, truncate=true) = _fZcondΩ(z, ω; modelabsz, Nquad, pDFHR, σ, m) |> (y -> truncate ? y[1]/(1 - pDFHR[2]*y[2]) : y[1])
+fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFHR, σ, m, truncate=true) = _fZcondΩ(z, ω; modelabsz, NLegendre, pDFHR, σ, m) |> (y -> truncate ? y[1]/(1 - pDFHR[2]*y[2]) : y[1])
  
 # the most time-consuming plotting is of the confidence intervals: for various values of ω, 
 # the cdf F(z|ω) is numerically calculated, many times--iteratively seeking where it hits, e.g., .025 and .975
 # to save time, pre-compute all components of f(z|ω) that do not depend on z, notably logdiffcdf(𝒩(0,σ), Z₀[k]+z̄, Z₀[k]-z̄)
-function FZcondΩ(z, ω; modelabsz::Bool=false, Nquad::Int=50, pDFHR, σ, m, rtol=.00001, order=13)
+function FZcondΩ(z, ω; modelabsz::Bool=false, NLegendre::Int=50, pDFHR, σ, m, rtol=.00001, order=13)
 	pD, pF, pH, pR = pDFHR
   lnpH = log(pH)
 
-	Z₀, W = gausslegendre(Nquad)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
+	Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
 	Z₀ .*= z̄  # change of variables to quadrature over [-z̄, z̄]
 	W  .*= z̄
 	
 	z̄divσ, Z₀divσ = z̄/σ[], Z₀/σ[]
 
 	A = 0.
-	B = Vector{Float64}(undef, Nquad)
-	@inbounds for k ∈ 1:Nquad
+	B = Vector{Float64}(undef, NLegendre)
+	@inbounds for k ∈ 1:NLegendre
 		a = Z₀[k] / σ[]
 		B[k] = log(W[k]) + logpdf(𝒩, Z₀[k] - ω) - log1mexp(lnpH + logdiffcdf(𝒩, a+z̄divσ, a-z̄divσ) * m[])
 		A += exp(B[k])
@@ -154,7 +171,7 @@ function FZcondΩ(z, ω; modelabsz::Bool=false, Nquad::Int=50, pDFHR, σ, m, rto
 		b = abs(zdivσ)
 
 		∫ = 0.
-		@inbounds for k ∈ 1:Nquad
+		@inbounds for k ∈ 1:NLegendre
 			a = Z₀divσ[k]
 			if a+b ≉ a-b
 				Fₖ = -.5(zdivσ - a)^2 + (m[]-1) * logdiffcdf(𝒩, a+b, a-b)  # p_H ϕ(z;z_0,σ^2 )
@@ -184,9 +201,9 @@ quantFcondΩ(q, ω; kwargs...) = find_zero(z -> q - FZcondΩ(z, ω; kwargs...), 
 
 # likelihood for a collection (vector, step range) of z's for plotting
 # If truncate=true (default), returns the truncated density, i.e., conditional on publication
-function fZ(z; modelabsz=false, Nquad=50, p, μ, τ, pDFHR, σ, m, truncate=true)
-  M = HnFmodel(z; d=length(τ), Nquad, modelabsz)
-  ∫, G = _HnFll(M; p,μ,τ,pDFHR,σ,m)
+function fZ(z; modelabsz=false, NHermite=50, NLegendre=50, p, μ, τ, ν, pDFHR, σ, m, truncate=true)
+  M = HnFmodel(z; d=length(τ), NHermite, NLegendre, modelabsz)
+  ∫, G = _HnFll(M; p,μ,τ,ν,pDFHR,σ,m)
   truncate && (∫ ./= 1 - pDFHR[2]*G)
   ∫
 end
@@ -194,7 +211,7 @@ end
 
 # f(z), f(ω), f(ω|z), E[ω|z]
 # inconsistency: z should be a scalar for fΩcondZ but a vector or other iterable for EΩcondZ
-fΩ(ω; p, μ, τ) = dot(p,pdf.(Normal.(μ,τ), ω))
+fΩ(ω; p, μ, τ) = sum(pᵢ * pdf(GenT(μᵢ,τᵢ,νᵢ), ω) for (pᵢ, μᵢ, τᵢ, νᵢ) in zip(p, μ, τ, ν))
 fΩcondZ(ω, z; p, μ, τ, kwargs...) = fZcondΩ(z, ω; kwargs..., truncate=false) * fΩ(ω; p, μ, τ) / fZ([z]; p, μ, τ, kwargs..., truncate=false)[]
 EΩcondZ(z; rtol=.00001, maxevals=1e4, p, μ, τ, kwargs...) = [quadgk(ω -> ω * fZcondΩ(zᵢ, ω; kwargs..., truncate=false) * fΩ(ω; p, μ, τ), -20, 20; rtol, maxevals)[1] for zᵢ∈z] ./ 
                                                                       fZ(z; p, μ, τ, kwargs..., truncate=false)
@@ -216,11 +233,13 @@ struct HnFmodel
 	insig::BitVector  # which knots are in insignificant region
 	splinetype::Interpolations.InterpolationType  # type of interpolation
 	zint::Vector{Float64}  # z values mapped to cardinal knot numbering space since interpolate() is faster with cardinally spaced knots
-	Nquad::Int  # number of quadrature points
-	Z₀::Vector{Float64}; lnW::Vector{Float64}  # quadrature nodes & weights
+	NHermite::Int  # number of quadrature points for integration over z₀ to compute f(z₀)
+	XHermite::Vector{Float64}; WHermite::Vector{Float64}  # quadrature nodes & weights
+	NLegendre::Int  # number of quadrature points
+	Z₀::Vector{Float64}; lnWLegendre::Vector{Float64}  # quadrature nodes & weights
   penalty::Function
 
-	function HnFmodel(z; d::Int, modelabsz::Bool=false, interpres::Int=0, Nquad::Int=50, splinetype::Interpolations.InterpolationType=BSpline(Linear()), 
+	function HnFmodel(z; d::Int, modelabsz::Bool=false, interpres::Int=0, NHermite::Int=50, NLegendre::Int=50, splinetype::Interpolations.InterpolationType=BSpline(Linear()), 
                     penalty::Function=(; kwargs...)->0.)
 		if iszero(interpres)
 			kts = z
@@ -231,10 +250,13 @@ struct HnFmodel
 			zint = (z .- first(kts)) .* interpres .+ 1
 		end
 
-		Z₀, W = gausslegendre(Nquad)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
-		Z₀ .*= z̄; W .*= z̄  # change of variables to quadrature over [-z̄, z̄]
+		XHermite, WHermite = gausshermite(NHermite)
+		XHermite .= √2 .* XHermite; WHermite ./= √π  # fold in adjustment for change of variables from pdf(Normal(ω)) to exp(-x²)
 
-		new(modelabsz, d, z, length(z), length(kts), interpres!=0, kts, -z̄ .≤ kts .≤ z̄, splinetype, zint, Nquad, Z₀, log.(W), penalty)
+		Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
+		Z₀ .*= z̄; W .*= z̄  # change of variables to quadrature over [-z̄, z̄]; ∫_(-∞)^∞▒g(ω)ϕ(ω;μ,σ^2 )dω=1/√π ∫_(-∞)^∞▒〖g(√2 σx+μ) e^(-x^2 ) dx〗
+
+		new(modelabsz, d, z, length(z), length(kts), interpres!=0, kts, -z̄ .≤ kts .≤ z̄, splinetype, zint, NHermite, XHermite, WHermite, NLegendre, Z₀, log.(W), penalty)
 	end
 end
 
@@ -247,27 +269,27 @@ import Base.==
 #
 
 # Compute observation-level likelihood (not log likelihood) and expected number of publish/file-drawer/p-hack decision junctures (G)
-function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::AbstractVector{T}, pDFHR::AbstractVector{T}, σ::Vector{T}, m::Vector{T}) where {T}
+function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::AbstractVector{T}, ν::AbstractVector{T}, pDFHR::AbstractVector{T}, σ::Vector{T}, m::Vector{T}) where {T}
   pD, _, pH, pR = pDFHR
 	z̄divσ, zdivσ, Z₀divσ = z̄/σ[], M.kts/σ[], M.Z₀/σ[]
 
 	# pre-allocating these hampers automatic differentiation because they depend on T, which could be a Dual number
 	∫ = zeros(T,M.k)
 	G = zero(T)	 # accumulator for expected number of publish/file-drawer/p-hack decision junctures
-	B = Vector{T}(undef,M.Nquad)
+	B = Vector{T}(undef,M.NLegendre)
   tot_hacking = Vector{T}(undef,M.k)
 
   if iszero(pH)
-    E = M.lnW
+    E = M.lnWLegendre
   else
-    E = Vector{T}(undef,M.Nquad)  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) ) for each z₀ (Legendre integration point)
+    E = Vector{T}(undef,M.NLegendre)  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) ) for each z₀ (Legendre integration point)
     lnpH = log(pH)
-    Threads.@threads for k ∈ 1:M.Nquad  # doing this math in logs seems to prevent NaNs in auto-differentiation
-      @inbounds E[k] = M.lnW[k] - log1mexp(lnpH + m[] * log(diffcdf(𝒩, Z₀divσ[k]+z̄divσ, Z₀divσ[k]-z̄divσ)))  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) )
+    Threads.@threads for k ∈ 1:M.NLegendre  # doing this math in logs seems to prevent NaNs in auto-differentiation
+      @inbounds E[k] = M.lnWLegendre[k] - log1mexp(lnpH + m[] * log(diffcdf(𝒩, Z₀divσ[k]+z̄divσ, Z₀divσ[k]-z̄divσ)))  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) )
     end
   end
 
-	F = Matrix{T}(undef, M.Nquad, M.k)  # ϕ(z;z_0,σ^2 ) 〖ΔΦ(|z|,-|z|;z_0,σ^2 )〗^(m-1) for each z and each z₀ (Legendre integration point)
+	F = Matrix{T}(undef, M.NLegendre, M.k)  # ϕ(z;z_0,σ^2 ) 〖ΔΦ(|z|,-|z|;z_0,σ^2 )〗^(m-1) for each z and each z₀ (Legendre integration point)
 	mm1 = m[] - 1
 	Threads.@threads for j ∈ 1:M.k
 		b = zdivσ[j]; absb = abs(b)
@@ -276,7 +298,7 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
     tot_hacking[j] = pD + (iszero(pH) ? pR : pR / exp(log1mexp(lnpH + logdiffcdf(𝒩, b+z̄divσ, b-z̄divσ) * m[])))
 
 		l = LinearIndices(F)[1,j]  # index of top entry in this col, arrays being stored col-first
-		@inbounds for k ∈ 1:M.Nquad
+		@inbounds for k ∈ 1:M.NLegendre
 			a = Z₀divσ[k]
 			if a+absb ≉ a-absb
 				Fₖⱼ = logpdf(𝒩, a-b) + mm1 * logdiffcdf(𝒩, a+absb, a-absb)
@@ -291,11 +313,16 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 
   pHσm = pH / σ[] * m[]
 	@inbounds for i ∈ 1:M.d
-    𝒩μ = Normal(μ[i], √(1+τ[i]^2))
+
+		# f(z_0) for ith mixture component, integrating out ω with Gauss-Hermite quadrature
+		# because this is an inner loop, economize by manually computing the t pdf while avoiding redundant work
+		_XHermite = M.XHermite .- μ[i]  # shift quadrature nodes for mixture component mean, one time
+		C = gamma(ν[i]/2 + .5) / (√(ν[i]*π) * gamma(ν[i]/2)) / τ[i]  # constant factor in t distribution pdf
+		f_z₀_i(z₀) = C * sum(w / (1 + ((ω + z₀) / τ[i])^2 / ν[i]) ^ ((ν[i]+1)/2) for (ω, w) ∈ zip(_XHermite, M.WHermite))
 
     Gᵢ = zero(T)
-    for k ∈ 1:M.Nquad
-      t = exp(E[k] + logpdf(𝒩μ, M.Z₀[k])) 
+    for k ∈ 1:M.NLegendre
+      t = exp(E[k] + log(f_z₀_i(M.Z₀[k])))
       Gᵢ += t
 		  B[k] = pHσm * t
     end
@@ -305,12 +332,12 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 			@inbounds begin
 				∫ⱼ = zero(T)
 				l = LinearIndices(F)[1,j]  # index of top entry in this col, arrays being stored col-first
-				for k ∈ 1:M.Nquad  # p-hacking contribution, integrating out z₀
+				for k ∈ 1:M.NLegendre  # p-hacking contribution, integrating out z₀
 					∫ⱼ += F[l] * B[k]
 					l += 1
 				end
 
-				t = M.modelabsz ? pdf(𝒩μ, M.kts[j])+pdf(𝒩μ, -M.kts[j]) : pdf(𝒩μ, M.kts[j])
+				t = M.modelabsz ? f_z₀_i(M.kts[j])+f_z₀_i(-M.kts[j]) : f_z₀_i(M.kts[j])
         if M.insig[j]  # component from using or reverting to initial measurement
 					∫ⱼ *= pD
           ∫ⱼ += t * tot_hacking[j]
@@ -337,14 +364,14 @@ end
 # returns named tuple of true z's (ω), initial measurements (z✻), and reported results
 # NaN = file-drawered
 # if truncate=true (the default), restricts all return results to published studies
-function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector{Float64}, pDFHR::Vector{Float64}, σ::Vector{Float64}, m ::Vector{Float64}, modelabsz::Bool=false, truncate::Bool=true)
+function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector{Float64}, ν::Vector{Float64}, pDFHR::Vector{Float64}, σ::Vector{Float64}, m ::Vector{Float64}, modelabsz::Bool=false, truncate::Bool=true)
 	ω = Vector{Float64}(undef,N)
 	z₀ = similar(ω)
 	z✻ = similar(ω)
-	𝒩μτ = Normal.(μ, τ)
+	Tμτν = GenT.(μ, τ, ν)
 	Threads.@threads for j ∈ eachindex(ω)
 		@inbounds begin
-			ω[j] = ωⱼ = rand(𝒩μτ[rand(Distributions.Categorical(p))])  # pick Gaussian mixture component
+			ω[j] = ωⱼ = rand(Tμτν[rand(Distributions.Categorical(p))])  # pick mixture component
 			z₀[j] = ωⱼ + rand(𝒩)  # initial measurement, variance 1 around ω
 		end
 	end
@@ -386,7 +413,7 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 	end
 
 	if truncate
-		keep = @. !isnan(z✻) && abs(z✻)<10
+		keep = @. !isnan(z✻)  # && abs(z✻)<10
 		ω, z₀, z✻  = ω[keep], z₀[keep], z✻[keep]
 	end
 	(ω=ω, z₀=z₀, z✻=z✻)
@@ -459,16 +486,16 @@ Base.repr(render::AbstractRenderType, x::Converged; args...) = RegressionTables.
 
 # set up and fit model
 # any extra keyword arguments are passed to Optim.Options
-function HnFfit(z::Vector; d::Int=1, interpres::Int=0, Nquad::Int=50, method::Optim.AbstractOptimizer=NewtonTrustRegion(), from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
+function HnFfit(z::Vector; d::Int=1, interpres::Int=0, NLegendre::Int=50, method::Optim.AbstractOptimizer=NewtonTrustRegion(), from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
 									estname="", modelabsz::Bool=false, penalty::Function=(; kwargs...)->0., kwargs...)
 
 	println("\nModeling $estname data with $d Gaussian mixture component(s)")
 	
 	# set starting values & parameter transformes, allowing caller to override defaults
-	from  = merge((p=fill(1/d,d), μ=fill(0.,d), τ=collect(LinRange(1,d,d)), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        ),  from)
-  xform = merge((p=SimplextoRⁿ, μ=shared[d] , τ=bcast(log)              , pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m)), xform)
+	from  = merge((p=fill(1/d,d), μ=fill(0.,d), τ=collect(LinRange(1,d,d)), ν=fill(1.,d), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        ),  from)
+  xform = merge((p=SimplextoRⁿ, μ=shared[d] , τ=bcast(log)              , ν=bcast(log), pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m)), xform)
 
-	M = HnFmodel(z; d, modelabsz, interpres, Nquad, penalty)
+	M = HnFmodel(z; d, modelabsz, interpres, NLegendre, penalty)
 	
 	_from = pairs(from)
 	fromxform = [xform[p](v) for (p,v) ∈ _from]  # starting values in optimization parameter space
@@ -485,7 +512,7 @@ function HnFfit(z::Vector; d::Int=1, interpres::Int=0, Nquad::Int=50, method::Op
 	coefdict_maker(v) = NamedTuple(p=>inverse(xform[p])(v[e]) for (p,e) ∈ extractor)
 	coefdict = coefdict_maker(θ)
 
-	function derived_stats(; p, μ, τ, pDFHR, σ, m)
+	function derived_stats(; p, μ, τ, ν, pDFHR, σ, m)
 		pD, pF, pH, pR = pDFHR
 
 		G = _HnFll(HnFmodel([0.]; d); p,μ,τ,pDFHR,σ,m)[2]
@@ -567,8 +594,8 @@ function HnFplot(z, est; zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen
 	axislegend(position=:lt, framevisible = false)
 	
 	# frequentist equal-tailed CI's as fn of z--Andrews & Kasy (2014), Figure 2
-	CIs0 = Cquant.([.025 .5 .975], zplot; rtol=.0001, Nquad=50, kwargsz0...)
-	CIs  = Cquant.([.025 .5 .975], zplot; rtol=.0001, Nquad=50, kwargsz... )
+	CIs0 = Cquant.([.025 .5 .975], zplot; rtol=.0001, NLegendre=50, kwargsz0...)
+	CIs  = Cquant.([.025 .5 .975], zplot; rtol=.0001, NLegendre=50, kwargsz... )
 	lb = linear_interpolation(CIs[:,1],zplot)(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
 	ub = linear_interpolation(CIs[:,3],zplot)(0.)
 	Axis(f[1,3], xlabel="Reported z", ylabel="Point estimate and 95% CI for true z", xticks=-5:5, yticks=-6:6)
@@ -629,6 +656,7 @@ end
 p = [.7,.3]
 μ = [0.7,0.7]
 τ = [1.2,1.7]
+ν = [1., 3]
 pD = .4
 pF = .3
 pH = .2
@@ -638,17 +666,18 @@ m = [5.]
 d = length(p)
 modelabsz=false
 pDFHR=[pD, pF, pH, pR]
-kwargs = (p=p, μ=μ, τ=τ, pDFHR=pDFHR, σ=σ, m=m, modelabsz=modelabsz)
+kwargs = (p=p, μ=μ, τ=τ, ν=ν, pDFHR=pDFHR, σ=σ, m=m, modelabsz=modelabsz)
 
-n = 100_000
+n = 1_000_000
 Random.seed!(1232)
 sim = HnFDGP(n; kwargs...)
 
 f = Figure()
-Axis(f[1,1])
-hist!(sim.z✻, bins=1000, normalization=:pdf)
+Axis(f[1,1], limits=(-10,10,nothing,nothing))
+hist!(sim.z✻[abs.(sim.z✻).<100], bins=100*2*100, normalization=:pdf)
 zplot = (modelabsz ? 0 : -10):.01:10
-lines!(zplot, fZ(zplot; kwargs...), color=:orange, label="True parameters")
+lines!(zplot, fZ(zplot; NHermite=1000, kwargs...), color=:orange, label="True parameters")
+f|>display
 
 penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(m[])) + logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
 res = HnFfit(sim.z✻; d, modelabsz, penalty, estname="simulated", extended_trace=false)  # penalized maximum likelihood
