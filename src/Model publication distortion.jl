@@ -35,24 +35,23 @@ Distributions.quantile(d::GenT, p::Real) = quantile(d.tdist, p) * d.σ + d.μ
 # to parameterize an n-vector of probabilities summing to 1 with an unbounded (n-1)-vector, apply logistic transform to latter, then map to squared spherical coordinates
 # https://en.wikipedia.org/wiki/N-sphere#Spherical_coordinates, https://math.stackexchange.com/questions/2861449/parameterizations-of-the-unit-simplex-in-mathbbr3
 function RⁿtoSimplex(q::AbstractVector{T}) where {T}
-	# if iszero(length(q))
-	# 	T[1]
-	# elseif isone(length(q))
-	# 	t = cospi(logistic(q[]))^2 |> (x -> isnan(x) ? zero(T) : x)
-	# 	[t, 1-t]
-	# else
+	if iszero(length(q))
+		T[1]
+	elseif isone(length(q))
+		t = cospi(logistic(q[]))^2 |> (x -> isnan(x) ? zero(T) : x)
+		T[t, 1-t]
+	else
 		p = Vector{T}(undef, length(q)+1)
 		Πsin² = one(T)
 		@inbounds for i ∈ eachindex(q)
-			cos² = (q[i] |> logistic |> cospi) ^2
+			sin², cos² = (q[i] |> logistic |> sincospi).^2
 			p[i] = Πsin² * cos²
-			Πsin² *= 1 - cos²
+			Πsin² *= sin²
 		end
 		p[end] = Πsin²
-		# replace!(p, NaN=>0)
-	# end
+		replace!(p, NaN=>0)
+	end
 end
-
 function SimplextoRⁿ(p::AbstractVector{T}) where {T}
 	q = Vector{T}(undef, length(p)-1)
 	sum = p[end]
