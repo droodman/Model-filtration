@@ -8,8 +8,8 @@ Pkg.instantiate()  # make sure all packages installed
 using Random, IrrationalConstants, Format, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature, Optim, LogExpFunctions, CSV, DataFrames, DataFramesMeta, ForwardDiff, LinearAlgebra, Roots, QuadGK, Statistics, 
        InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions
 
+const z̄ = 1.9599639845401
 const 𝒩 = Normal()
-const z̄ = quantile(𝒩, .975)  # 1.96
 
 @inline diffcdf(N,b,a) = cdf(N,b) - cdf(N,a)
 @inline sqrt0(x::T) where {T} = x<0 ? zero(T) : sqrt(x)
@@ -35,24 +35,16 @@ Distributions.quantile(d::GenT, p::Real) = quantile(d.tdist, p) * d.σ + d.μ
 # to parameterize an n-vector of probabilities summing to 1 with an unbounded (n-1)-vector, apply logistic transform to latter, then map to squared spherical coordinates
 # https://en.wikipedia.org/wiki/N-sphere#Spherical_coordinates, https://math.stackexchange.com/questions/2861449/parameterizations-of-the-unit-simplex-in-mathbbr3
 function RⁿtoSimplex(q::AbstractVector{T}) where {T}
-	# if iszero(length(q))
-	# 	T[1]
-	# elseif isone(length(q))
-	# 	t = cospi(logistic(q[]))^2 |> (x -> isnan(x) ? zero(T) : x)
-	# 	[t, 1-t]
-	# else
-		p = Vector{T}(undef, length(q)+1)
-		Πsin² = one(T)
-		@inbounds for i ∈ eachindex(q)
-			cos² = (q[i] |> logistic |> cospi) ^2
-			p[i] = Πsin² * cos²
-			Πsin² *= 1 - cos²
-		end
-		p[end] = Πsin²
-		# replace!(p, NaN=>0)
-	# end
+	p = Vector{T}(undef, length(q)+1)
+	Πsin² = one(T)
+	@inbounds for i ∈ eachindex(q)
+		sin², cos² = (q[i] |> logistic |> sincospi).^2
+		p[i] = Πsin² * cos²
+		Πsin² *= sin²
+	end
+	p[end] = Πsin²
+	replace!(p, NaN=>0)
 end
-
 function SimplextoRⁿ(p::AbstractVector{T}) where {T}
 	q = Vector{T}(undef, length(p)-1)
 	sum = p[end]
@@ -209,7 +201,7 @@ quantFcondΩ(q, ω; kwargs...) = find_zero(z -> q - FZcondΩ(z, ω; kwargs...), 
 
 # likelihood for a collection (vector, step range) of z's for plotting
 # If truncate=true (default), returns the truncated density, i.e., conditional on publication
-function fZ(z; modelabsz=false, NHermite=1000, NLegendre=50, p, μ, τ, ν, pDFHR, σ, m, truncate=true)
+function fZ(z; modelabsz=false, NHermite=50, NLegendre=50, p, μ, τ, ν, pDFHR, σ, m, truncate=true)
   M = HnFmodel(z; d=length(τ), NHermite, NLegendre, modelabsz)
   ∫, G = _HnFll(M; p,μ,τ,ν,pDFHR,σ,m)
   truncate && (∫ ./= 1 - pDFHR[2]*G)
@@ -219,10 +211,10 @@ end
 
 # f(z), f(ω), f(ω|z), E[ω|z]
 # inconsistency: z should be a scalar for fΩcondZ but a vector or other iterable for EΩcondZ
-fΩ(ω; p, μ, τ, ν) = sum(pᵢ * pdf(GenT(μᵢ,τᵢ,νᵢ), ω) for (pᵢ, μᵢ, τᵢ, νᵢ) in zip(p, μ, τ, ν))
-fΩcondZ(ω, z; p, μ, τ, ν, kwargs...) = fZcondΩ(z, ω; kwargs..., truncate=false) * fΩ(ω; p, μ, τ, ν) / fZ([z]; p, μ, τ, ν, kwargs..., truncate=false)[]
-EΩcondZ(z; rtol=.00001, maxevals=1e4, p, μ, τ, ν, kwargs...) = [quadgk(ω -> ω * fZcondΩ(zᵢ, ω; kwargs..., truncate=false) * fΩ(ω; p, μ, τ, ν), -20, 20; rtol, maxevals)[1] for zᵢ∈z] ./ 
-                                                                      fZ(z; p, μ, τ, ν, kwargs..., truncate=false)
+fΩ(ω; p, μ, τ) = sum(pᵢ * pdf(GenT(μᵢ,τᵢ,νᵢ), ω) for (pᵢ, μᵢ, τᵢ, νᵢ) in zip(p, μ, τ, ν))
+fΩcondZ(ω, z; p, μ, τ, kwargs...) = fZcondΩ(z, ω; kwargs..., truncate=false) * fΩ(ω; p, μ, τ) / fZ([z]; p, μ, τ, kwargs..., truncate=false)[]
+EΩcondZ(z; rtol=.00001, maxevals=1e4, p, μ, τ, kwargs...) = [quadgk(ω -> ω * fZcondΩ(zᵢ, ω; kwargs..., truncate=false) * fΩ(ω; p, μ, τ), -20, 20; rtol, maxevals)[1] for zᵢ∈z] ./ 
+                                                                      fZ(z; p, μ, τ, kwargs..., truncate=false)
 
 # CIs
 Cquant(α, z; kwargs...) = find_zero(ω -> α - FZcondΩ(z, ω; kwargs...), (-20,20), Roots.ITP())  # Andrews & Kasy (2019), eq. 2
@@ -234,7 +226,6 @@ struct HnFmodel
 	modelabsz::Bool  # modeling |z|?
 	d::Int  # number of mixture components
 	z::Vector{Float64}  # all data
-	wt::Vector{Float64}  # observation weights
 	N::Int  # number of z's in data, # of insignificant
 	k::Int  # number of z knots for interpolation
 	interpolate::Bool	# interpolation resolution (points per unit interval); 0 means no interpolation
@@ -243,12 +234,12 @@ struct HnFmodel
 	splinetype::Interpolations.InterpolationType  # type of interpolation
 	zint::Vector{Float64}  # z values mapped to cardinal knot numbering space since interpolate() is faster with cardinally spaced knots
 	NHermite::Int  # number of quadrature points for integration over z₀ to compute f(z₀)
-	Ω::Vector{Float64}; WHermite::Vector{Float64}  # quadrature nodes & weights
+	XHermite::Vector{Float64}; WHermite::Vector{Float64}  # quadrature nodes & weights
 	NLegendre::Int  # number of quadrature points
-	Z₀::Vector{Float64}; WLegendre::Vector{Float64}; lnWLegendre::Vector{Float64}  # quadrature nodes & weights
+	Z₀::Vector{Float64}; lnWLegendre::Vector{Float64}  # quadrature nodes & weights
   penalty::Function
 
-	function HnFmodel(z, wt=Float64[]; d::Int, modelabsz::Bool=false, interpres::Int=0, NHermite::Int=1000, NLegendre::Int=50, splinetype::Interpolations.InterpolationType=BSpline(Linear()), 
+	function HnFmodel(z; d::Int, modelabsz::Bool=false, interpres::Int=0, NHermite::Int=50, NLegendre::Int=50, splinetype::Interpolations.InterpolationType=BSpline(Linear()), 
                     penalty::Function=(; kwargs...)->0.)
 		if iszero(interpres)
 			kts = z
@@ -259,13 +250,13 @@ struct HnFmodel
 			zint = (z .- first(kts)) .* interpres .+ 1
 		end
 
-		Ω, WHermite = gausshermite(NHermite)
-		Ω .= √2 .* Ω; WHermite ./= √π  # fold in adjustment for change of variables from pdf(Normal(ω)) to exp(-x²)
+		XHermite, WHermite = gausshermite(NHermite)
+		XHermite .= √2 .* XHermite; WHermite ./= √π  # fold in adjustment for change of variables from pdf(Normal(ω)) to exp(-x²)
 
 		Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
 		Z₀ .*= z̄; W .*= z̄  # change of variables to quadrature over [-z̄, z̄]; ∫_(-∞)^∞▒g(ω)ϕ(ω;μ,σ^2 )dω=1/√π ∫_(-∞)^∞▒〖g(√2 σx+μ) e^(-x^2 ) dx〗
 
-		new(modelabsz, d, z, wt/mean(wt), length(z), length(kts), interpres!=0, kts, -z̄ .≤ kts .≤ z̄, splinetype, zint, NHermite, Ω, WHermite, NLegendre, Z₀, W, log.(W), penalty)
+		new(modelabsz, d, z, length(z), length(kts), interpres!=0, kts, -z̄ .≤ kts .≤ z̄, splinetype, zint, NHermite, XHermite, WHermite, NLegendre, Z₀, log.(W), penalty)
 	end
 end
 
@@ -322,12 +313,12 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 
   pHσm = pH / σ[] * m[]
 	@inbounds for i ∈ 1:M.d
+
 		# f(z_0) for ith mixture component, integrating out ω with Gauss-Hermite quadrature
 		# because this is an inner loop, economize by manually computing the t pdf while avoiding redundant work
-		_XHermite = M.Ω .- μ[i]  # shift quadrature nodes for mixture component mean, one time
-		_ν = (ν[i] + 1) / 2
-		C = p[i] * gamma(_ν) / (√(ν[i]*π) * gamma(ν[i]/2) * τ[i])  # constant factor in t distribution pdf
-		f_z₀_i(z₀) = sum(w / (1 + ((ω + z₀) / τ[i])^2 / ν[i]) ^ _ν for (ω, w) ∈ zip(_XHermite, M.WHermite))
+		_XHermite = M.XHermite .- μ[i]  # shift quadrature nodes for mixture component mean, one time
+		C = gamma(ν[i]/2 + .5) / (√(ν[i]*π) * gamma(ν[i]/2)) / τ[i]  # constant factor in t distribution pdf
+		f_z₀_i(z₀) = C * sum(w / (1 + ((ω + z₀) / τ[i])^2 / ν[i]) ^ ((ν[i]+1)/2) for (ω, w) ∈ zip(_XHermite, M.WHermite))
 
     Gᵢ = zero(T)
     for k ∈ 1:M.NLegendre
@@ -335,7 +326,7 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
       Gᵢ += t
 		  B[k] = pHσm * t
     end
-    G += C * Gᵢ
+    G += p[i] * Gᵢ
 
 		Threads.@threads for j ∈ 1:M.k  # for each z value/interpolation point
 			@inbounds begin
@@ -353,7 +344,7 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 				else
           ∫ⱼ += t
 				end
-				∫[j] += C * ∫ⱼ 
+				∫[j] += p[i] * ∫ⱼ
 			end
 		end
 	end
@@ -365,8 +356,7 @@ function HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Abs
 	Threads.@threads for j ∈ 1:M.k
 		@inbounds ∫[j] = log(∫[j])
 	end
-	M.interpolate && (∫ = interpolate!(∫, BSpline(Cubic())).(M.zint))
-	(iszero(length(M.wt)) ? sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -pDFHR[2]*G) + M.penalty(; p, μ, τ, pDFHR, σ, m)
+	sum(M.interpolate ? interpolate!(∫, BSpline(Cubic())).(M.zint) : ∫) - xlog1py(M.N, -pDFHR[2]*G) + M.penalty(; p, μ, τ, pDFHR, σ, m)
 end
 
 
@@ -496,16 +486,16 @@ Base.repr(render::AbstractRenderType, x::Converged; args...) = RegressionTables.
 
 # set up and fit model
 # any extra keyword arguments are passed to Optim.Options
-function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLegendre::Int=50, NHermite::Int=1000, from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
-									methods::Vector=[NewtonTrustRegion()], estname="", modelabsz::Bool=false, penalty::Function=(; kwargs...)->0., kwargs...)
+function HnFfit(z::Vector; d::Int=1, interpres::Int=0, NLegendre::Int=50, method::Optim.AbstractOptimizer=NewtonTrustRegion(), from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
+									estname="", modelabsz::Bool=false, penalty::Function=(; kwargs...)->0., kwargs...)
 
-	println("\nModeling $estname data with $d mixture component(s)")
+	println("\nModeling $estname data with $d Gaussian mixture component(s)")
 	
 	# set starting values & parameter transformes, allowing caller to override defaults
 	from  = merge((p=fill(1/d,d), μ=fill(0.,d), τ=collect(LinRange(1,d,d)), ν=fill(1.,d), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        ),  from)
   xform = merge((p=SimplextoRⁿ, μ=shared[d] , τ=bcast(log)              , ν=bcast(log), pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m)), xform)
 
-	M = HnFmodel(z, wt; d, modelabsz, interpres, NLegendre, NHermite, penalty)
+	M = HnFmodel(z; d, modelabsz, interpres, NLegendre, penalty)
 	
 	_from = pairs(from)
 	fromxform = [xform[p](v) for (p,v) ∈ _from]  # starting values in optimization parameter space
@@ -516,13 +506,8 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLe
 	xformer(x) = (p=>inverse(xform[p])(x[e]) for (p,e) ∈ extractor)  # map primary parameters into full model space, expressed as functions of optimization parameters, e.g. exp(log(σ))
 	objective(x) = -HnFll(M; xformer(x)...)
 
-	θ = vcat(fromxform...)
-	res = nothing
-	for method ∈ methods
-		res = Optim.optimize(objective, θ, NewtonTrustRegion(), Optim.Options(; merge((iterations=100, show_trace=true), kwargs)...), autodiff=:forward)
-		θ = Optim.minimizer(res)
-	end
-
+	res = Optim.optimize(objective, vcat(fromxform...), method, Optim.Options(; merge((iterations=100, show_trace=true), kwargs)...), autodiff=:forward)
+	θ = Optim.minimizer(res)
 	invxform = θ -> [θ[e] |> inverse(xform[p]) for (p,e) ∈ extractor]
 	coefdict_maker(v) = NamedTuple(p=>inverse(xform[p])(v[e]) for (p,e) ∈ extractor)
 	coefdict = coefdict_maker(θ)
@@ -530,11 +515,8 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLe
 	function derived_stats(; p, μ, τ, ν, pDFHR, σ, m)
 		pD, pF, pH, pR = pDFHR
 
-		G = _HnFll(HnFmodel([0.]; d); p,μ,τ,ν,pDFHR,σ,m)[2]
-
-		I₀ = sum(pᵢ * sum(w_ω * w_z₀ * pdf(GenT(μᵢ,τᵢ,νᵢ), ω + z₀) for (ω , w_ω ) ∈ zip(M.Ω , M.WHermite)
-					                                                     for (z₀, w_z₀) ∈ zip(M.Z₀, M.WLegendre))
-																														   for (pᵢ, μᵢ,τᵢ,νᵢ) ∈ zip(p,μ,τ,ν))  # fraction initially insignificant
+		G = _HnFll(HnFmodel([0.]; d); p,μ,τ,pDFHR,σ,m)[2]
+		I₀ = dot(p, diffcdf.(Normal.(μ,.√(1 .+τ.^2)), z̄, -z̄)) 	# fraction initially insignificant
 
 		[
 			pF*G / I₀                     # fraction of insignificant studies file-drawered
@@ -561,35 +543,37 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLe
 	converged = Optim.converged(res)
 
 	one2D = first(Unicode.graphemes("₁₂₃₄"),d)
-	coefnames = vcat("p".*one2D, "μ".*one2D, "τ".*one2D, "ν".*one2D, "pD", "pF", "pH", "pR", "σ", "m", "fraction_insignificant_file_drawered", "overall_file_drawer_fraction", 
+	coefnames = vcat("p".*one2D, "μ".*one2D, "τ".*one2D, "pD", "pF", "pH", "pR", "σ", "m", "fraction_insignificant_file_drawered", "overall_file_drawer_fraction", 
 										 "fraction_insignificant_published_as_is", "significant_p_hacked_fraction", "insignificant_p_hacked_fraction",
 										 "fraction_published_insignificant_p_hacked", "fraction_significant_p_hacked")
 
 	G = _HnFll(M; coefdict...)[2]
-	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), ll=-Optim.minimum(res))
+	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), ll = -Optim.minimum(res))
 end
 
-function HnFplot(z, est, wt::Vector=Float64[]; zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
+function HnFplot(z, est; zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
 	t = est.coefdict
-	kwargsω = (p=t.p, μ=t.μ, τ=t.τ, ν=t.ν)
+	kwargsω = (p=t.p, μ=t.μ, τ=t.τ)
 	kwargsz = (pDFHR=t.pDFHR, σ=t.σ, m=t.m)
 	kwargsz0 = (pDFHR=[1.,0.,0.,0.], σ=[1.], m=[1.])  # no distortion
 
 	f = Figure(size=(1500,900))
 
 	# empirical distribution of z's + model fit
-	Axis(f[1,1], xlabel="z", ylabel="Density", limits=(-10,10,nothing,nothing))
-	hist!(z, normalization=:pdf, bins=floor(Int,√size(z,1)), weights=wt, label="Actual published effects", color=(:slategray,.4))  # outline histogram of data
+	Axis(f[1,1], xlabel="z", ylabel="Density")
+	hist!(z, normalization=:pdf, bins=floor(Int,√size(z,1)), label="Actual published effects", color=(:slategray,.4))  # outline histogram of data
 
 	s,e = extrema(z); _zplot = s:.01:e
+	published_mass = 1 - est.file_drawer
 
-  pplottrue                     = map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν),  z)), _zplot)
-  est.modelabsz && (pplottrue .+= map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν), -z)), _zplot))
-	pplottrue ./= 1 - est.coef[findfirst(==("overall_file_drawer_fraction"), est.coefnames)]
+  pplottrue    = map(z->dot(t.p, (@. pdf(Normal(kwargsω.μ, t.τ       ), z))) / published_mass, _zplot)
+	pplotinitial = map(z->dot(t.p, (@. pdf(Normal(kwargsω.μ, √(t.τ^2+1)), z))) / published_mass, _zplot)
+  if est.modelabsz
+    pplottrue    .+= map(z->dot(t.p, (@. pdf(Normal(kwargsω.μ, t.τ       ), -z))) / published_mass, _zplot)
+    pplotinitial .+= map(z->dot(t.p, (@. pdf(Normal(kwargsω.μ, √(t.τ^2+1)), -z))) / published_mass, _zplot)
+  end
 
-	pplotinitial = fZ(_zplot; kwargsω..., kwargsz0..., modelabsz=est.modelabsz)
-	pplotfit     = fZ(_zplot; kwargsω..., kwargsz ..., modelabsz=est.modelabsz)
-
+	pplotfit = fZ(_zplot; kwargsω..., kwargsz..., modelabsz=est.modelabsz)
 	lines!(_zplot, pplottrue, label="Model: true effects", color=Makie.wong_colors()[3])
 	lines!(_zplot, pplotinitial, label="Model: initial estimates", color=Makie.wong_colors()[1])
 	lines!(_zplot, pplotfit, label="Model: published estimates", color=Makie.wong_colors()[6])
@@ -610,21 +594,21 @@ function HnFplot(z, est, wt::Vector=Float64[]; zplot::StepRangeLen=-5+1e-3:.01:5
 	axislegend(position=:lt, framevisible = false)
 	
 	# frequentist equal-tailed CI's as fn of z--Andrews & Kasy (2014), Figure 2
-	# CIs0 = Cquant.([.025 .5 .975], zplot; rtol=.0001, kwargsz0...)
-	# CIs  = Cquant.([.025 .5 .975], zplot; rtol=.0001, kwargsz... )
-	# lb = linear_interpolation(CIs[:,1],zplot)(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
-	# ub = linear_interpolation(CIs[:,3],zplot)(0.)
-	# Axis(f[1,3], xlabel="Reported z", ylabel="Point estimate and 95% CI for true z", xticks=-5:5, yticks=-6:6)
-	# lines!(zplot, CIs0[:,1], color=Makie.wong_colors()[1], label="No adjustment")
-	# lines!(zplot, CIs0[:,2], color=Makie.wong_colors()[1], linestyle=:dash)
-	# lines!(zplot, CIs0[:,3], color=Makie.wong_colors()[1])
-	# lines!(zplot, CIs[:,1], color=Makie.wong_colors()[6], label="Adjusting for research distortion")
-	# lines!(zplot, CIs[:,2], color=Makie.wong_colors()[6], linestyle=:dash)
-	# lines!(zplot, CIs[:,3], color=Makie.wong_colors()[6])
-	# scatter!([lb;ub],[0.;0], color=Makie.wong_colors()[6])
-	# text!(lb, 0., text=format("{:03.2f}", lb), align=(:right, :bottom))
-	# text!(ub, 0., text=format("{:03.2f}", ub), align=(:left, :top))
-	# axislegend(position=:lt, framevisible = false)
+	CIs0 = Cquant.([.025 .5 .975], zplot; rtol=.0001, NLegendre=50, kwargsz0...)
+	CIs  = Cquant.([.025 .5 .975], zplot; rtol=.0001, NLegendre=50, kwargsz... )
+	lb = linear_interpolation(CIs[:,1],zplot)(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
+	ub = linear_interpolation(CIs[:,3],zplot)(0.)
+	Axis(f[1,3], xlabel="Reported z", ylabel="Point estimate and 95% CI for true z", xticks=-5:5, yticks=-6:6)
+	lines!(zplot, CIs0[:,1], color=Makie.wong_colors()[1], label="No adjustment")
+	lines!(zplot, CIs0[:,2], color=Makie.wong_colors()[1], linestyle=:dash)
+	lines!(zplot, CIs0[:,3], color=Makie.wong_colors()[1])
+	lines!(zplot, CIs[:,1], color=Makie.wong_colors()[6], label="Adjusting for research distortion")
+	lines!(zplot, CIs[:,2], color=Makie.wong_colors()[6], linestyle=:dash)
+	lines!(zplot, CIs[:,3], color=Makie.wong_colors()[6])
+	scatter!([lb;ub],[0.;0], color=Makie.wong_colors()[6])
+	text!(lb, 0., text=format("{:03.2f}", lb), align=(:right, :bottom))
+	text!(ub, 0., text=format("{:03.2f}", ub), align=(:left, :top))
+	axislegend(position=:lt, framevisible = false)
 
 	# Bayesian posterior mean of ω as fn of Z
 	pplot0 = EΩcondZ(zplot; kwargsω..., kwargsz0...)
@@ -659,7 +643,7 @@ function HnFplot(z, est, wt::Vector=Float64[]; zplot::StepRangeLen=-5+1e-3:.01:5
 
 	Axis(fAK[1,2], xlabel="True z", ylabel="Coverage of reported 95% CI")
 	lines!(ωplot, fill(.95, size(ωplot)...))
-	lines!(ωplot, @. FZcondΩ(ωplot+z̄, ωplot; kwargsz...)-FZcondΩ(ωplot-z̄, ωplot; kwargsz...))
+	lines!(ωplot, FZcondΩ.(ωplot.+z̄, ωplot; kwargsz...).-FZcondΩ.(ωplot.-z̄, ωplot; kwargsz...))
 	fAK |> display
 	save("output/$(est.estname) A&K Fig1.png", fAK)
 end
@@ -680,11 +664,11 @@ pR = .1
 σ = [.2]
 m = [5.]
 d = length(p)
-modelabsz = false
-pDFHR = [pD, pF, pH, pR]
+modelabsz=false
+pDFHR=[pD, pF, pH, pR]
 kwargs = (p=p, μ=μ, τ=τ, ν=ν, pDFHR=pDFHR, σ=σ, m=m, modelabsz=modelabsz)
 
-n = 100_000
+n = 1_000_000
 Random.seed!(1232)
 sim = HnFDGP(n; kwargs...)
 
@@ -701,7 +685,7 @@ print(res.coefdict)
 lines!(zplot, fZ(zplot; modelabsz, res.coefdict...), color=:green, label="Estimated parameters")
 
 f[0, :] = Label(f, "Simulation vs model")
-axislegend(position=:lt, framevisible=false)
+axislegend(position=:lt, framevisible = false)
 colsize!(f.layout, 1, Relative(1))
 f |> display
 
@@ -751,8 +735,8 @@ f |> display
 	@. df.z = log(df.mean) / (ifelse(ismissing(df.lower) || iszero(df.lower), log(df.upper / df.mean), log(df.upper / df.lower) / 2) / cquantile(𝒩, (1 - df.ci_level)/2))
 	@. @subset!(df, !ismissing(:z) && !ismissing(:lower) && iszero(:mistake) && abs(:z) < 10.)  # van Zwet & Cator Figure 1 stops at 10
 	# @. @subset!(df, :source!="Abstract")
-	results = [HnFfit(df.z; d, penalty, NHermite=100, interpres=1000          , estname="GW$d") for d ∈ 1:3]
-	results = [HnFfit(df.z; d, penalty, NHermite=100, from=results[d].coefdict, estname="GW$d") for d ∈ 1:3]
+	results = [HnFfit(df.z; d, penalty, interpres=1000          , estname="GW$d") for d ∈ 1:3]
+	results = [HnFfit(df.z; d, penalty, from=results[d].coefdict, estname="GW$d") for d ∈ 1:3]
 	GW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
 	HnFplot(df.z, GW; title="Georgescu and Wren (2018) data")
 	# GW2_R0 = HnFfit(df.z; d=2, from=(pDFHR=[1/3,1/3,1/3,0],), xform=(pDFHR = SimplextoRⁿ ∘ get_pR0,), estname="GW2", title="Georgescu and Wren (2018) data, 2-component prior, pR=0")	
@@ -769,11 +753,11 @@ f |> display
 	# Star Wars, doi.org/10.1257/app.20150044, openicpsr.org/openicpsr/project/113633/version/V1/view?path=/openicpsr/113633/fcr:versions/V1/brodeur_le_sangnier_zylberberg_replication/Data/Final/final_stars_supp.dta&type=file
 	df = DataFrame(CSV.File("data/Brodeur et al. 2016/final_stars_supp.csv"))
 	df.z = df.coefficient_num ./ df.standard_deviation_num
-	@. @subset!(df, lowercase(:main)=="yes" && !ismissing(df.z) && abs(df.z)<20)
+	@. @subset!(df, lowercase(:main)=="yes" && !ismissing(df.z) && abs(df.z)<10)
 	disallowmissing!(df, :z)
-	results = [HnFfit(df.z, df.weight_table; d, penalty, estname="SW$d") for d ∈ 1:3]
+	results = [HnFfit(df.z; d, penalty, estname="SW$d") for d ∈ 1:3]
 	SW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
-	HnFplot(df.z, SW, df.weight_table; title="Brodeur et al. (2016) data")
+	HnFplot(df.z, SW; title="Brodeur et al. (2016) data")
 
 	# Brodeur, Cook, and Heyes 2020, DOI 10.1257/aer.20190687, openicpsr.org/openicpsr/project/120246/version/V1/view?path=/openicpsr/120246/fcr:versions/V1/MM-Data.dta&type=file
 	df = DataFrame(CSV.File("data/Brodeur, Cook, and Heyes 2020/MM Data.csv"))
