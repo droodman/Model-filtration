@@ -244,7 +244,7 @@ struct HnFmodel
 	splinetype::Interpolations.InterpolationType  # type of interpolation
 	zint::Vector{Float64}  # z values mapped to cardinal knot numbering space since interpolate() is faster with cardinally spaced knots
 	NHermite::Int  # number of quadrature points for integration over z₀ to compute f(z₀)
-	Ω::Vector{Float64}; Ω²::Vector{Float64}; WHermite::Vector{Float64}  # quadrature nodes & weights
+	Ω::Vector{Float64}; WHermite::Vector{Float64}; lnWpΩ²::Vector{Float64}  # quadrature nodes & weights
 	NLegendre::Int  # number of quadrature points
 	Z₀::Vector{Float64}; WLegendre::Vector{Float64}; lnWLegendre::Vector{Float64}  # quadrature nodes & weights
   penalty::Function
@@ -271,7 +271,7 @@ struct HnFmodel
 		Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
 		Z₀ .*= z̄; W .*= z̄  # change of variables to quadrature over [-z̄, z̄]
 		
-		new(modelabsz, [d], z, wt/mean(wt), length(z), length(kts), interpres!=0, kts, -z̄ .≤ kts .≤ z̄, splinetype, zint, NHermite, Ω, Ω.^2, WHermite, NLegendre, Z₀, W, log.(W), penalty, Dict(), Dict(), Dict(), Dict(), Dict())
+		new(modelabsz, [d], z, wt/mean(wt), length(z), length(kts), interpres!=0, kts, -z̄ .≤ kts .≤ z̄, splinetype, zint, NHermite, Ω, WHermite, log.(WHermite).+.5Ω.^2, NLegendre, Z₀, W, log.(W), penalty, Dict(), Dict(), Dict(), Dict(), Dict())
 	end
 end
 
@@ -287,6 +287,10 @@ import Base.==
 # Compute observation-level likelihood (not log likelihood) and expected number of publish/file-drawer/p-hack decision junctures (G)
 function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::AbstractVector{T}, ν::AbstractVector{T}, pDFHR::AbstractVector{T}, σ::Vector{T}, m::Vector{T}) where {T}
   pD, _, pH, pR = pDFHR
+	lnpD, lnpH = log(pD), log(pH)
+	lnpHσm = lnpH + log(m[] / σ[])
+	mm1 = m[] - 1
+
 	z̄divσ, zdivσ, Z₀divσ = z̄/σ[], M.kts/σ[], M.Z₀/σ[]
 
 	is = findall(>(1e-6), p)  # nonzero mixture components
@@ -295,85 +299,88 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 	# pre-allocating these hampers automatic differentiation because they depend on T, which could be a Dual number
 	∫ = _d<M.d[] ? Matrix{T}(undef,M.k,_d) : get!(M.∫dict, T, Matrix{T}(undef,M.k,_d))  # likelihood contributions for each z knot and each mixture component
 	G = zero(T)	 # accumulator for expected number of publish/file-drawer/p-hack decision junctures
-	B = get!(M.Bdict, T, Vector{T}(undef,M.NLegendre))
-	xdiv_τ = Vector{T}(undef,M.NHermite)
+	B = get!(M.Bdict, T, Vector{T}(undef, M.NLegendre))
+	F = get!(M.Fdict, T, Matrix{T}(undef, M.NLegendre, M.k))  # ϕ(z;z_0,σ^2 ) 〖ΔΦ(|z|,-|z|;z_0,σ^2 )〗^(m-1) for each z and each z₀ (Legendre integration point)
   tot_hacking = get!(M.tot_hacking_dict, T, Vector{T}(undef,M.k))
 
   if pH < eps()
     E = M.lnWLegendre
   else
     E = get!(M.Edict, T, Vector{T}(undef,M.NLegendre))  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) ) for each z₀ (Legendre integration point)
-    lnpH = log(pH)
     for k ∈ eachindex(E)  # for each Legendre point; pre-compute part of p-hacking contribution
-      @inbounds E[k] = M.lnWLegendre[k] - log1mexp(lnpH + m[] * log(diffcdf(𝒩, Z₀divσ[k]+z̄divσ, Z₀divσ[k]-z̄divσ)))  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) )
+      @inbounds E[k] = M.lnWLegendre[k] - log1mexp(lnpH + m[] * logdiffcdf(𝒩, Z₀divσ[k]+z̄divσ, Z₀divσ[k]-z̄divσ))  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) )
     end
   end
 
-	F = get!(M.Fdict, T, Matrix{T}(undef, M.NLegendre, M.k))  # ϕ(z;z_0,σ^2 ) 〖ΔΦ(|z|,-|z|;z_0,σ^2 )〗^(m-1) for each z and each z₀ (Legendre integration point)
-	mm1 = m[] - 1
 	Threads.@threads for j ∈ 1:M.k
-		b = zdivσ[j]; absb = abs(b)
-		M.modelabsz && (neg2b = -2b)
+		@inbounds begin
+			b = zdivσ[j]; absb = abs(b)
+			M.modelabsz && (neg2b = -2b)
 
-    tot_hacking[j] = log(pD + (pH < eps() ? pR : pR / exp(log1mexp(lnpH + logdiffcdf(𝒩, b+z̄divσ, b-z̄divσ) * m[]))))
+			M.insig[j] && (tot_hacking[j] = log(pD + (pH < eps() ? pR : pR / exp(log1mexp(lnpH + logdiffcdf(𝒩, b+z̄divσ, b-z̄divσ) * m[])))))
 
-		l = LinearIndices(F)[1,j]  # index of top entry in this col, arrays being stored col-first
-		@inbounds for k ∈ eachindex(Z₀divσ)  # for each z₀ (Legendre integration point)
-			a = Z₀divσ[k]
-			if a+absb ≉ a-absb
-				Fₖⱼ = logpdf(𝒩, a-b) + mm1 * logdiffcdf(𝒩, a+absb, a-absb)
-				M.modelabsz && (Fₖⱼ += log1pexp(neg2b * a))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
-				F[l] = Fₖⱼ
-			else
-				F[l] = -floatmax()  # z->0 limit if m ≥ 1
+			l = LinearIndices(F)[1,j]  # index of top entry in this col, arrays being stored col-first
+			for k ∈ eachindex(Z₀divσ)  # for each z₀ (Legendre integration point)
+				a = Z₀divσ[k]
+				if a+absb ≉ a-absb
+					Fₖⱼ = mm1 * logdiffcdf(𝒩, a+absb, a-absb) - .5(log2π + (a-b)^2)
+					M.modelabsz && (Fₖⱼ += log1pexp(neg2b * a))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
+					F[l] = Fₖⱼ
+				else
+					F[l] = -floatmax()  # z->0 limit if m ≥ 1
+				end
+				l += 1
 			end
-			l += 1
 		end
 	end
 
-  pHσm = pH / σ[] * m[]
 	@inbounds for _i ∈ 1:_d
 		i = is[_i]
 
 		# f(z_0) for ith mixture component, integrating out ω with Gauss-Hermite quadrature
-		# because this is an inner loop, economize by manually computing the t pdf while avoiding redundant work
-		_τᵢ² = 1+τ[i]^2; _τᵢ = √_τᵢ²
-		@. xdiv_τ = M.Ω / _τᵢ
-		_νᵢ = (ν[i]+1)/2
-		C = log(p[i]) - logbeta(ν[i]/2,.5) - .5log(ν[i])  # constant factor in t pdf, in logs
-		lnf_z₀_i(z₀) = logsumexp(begin  # log [∫_(-∞)^∞ ϕ(z₀;ω)t(ω;μ,τᵢ²,νᵢ)dω] sans ln C factor
-											d = (z₀-μ[i])/_τᵢ²
-											log(w) + .5(x² - (xdiv_τᵢ * τ[i] - d)^2) - log1p((xdiv_τᵢ + d * τ[i])^2 / ν[i]) * _νᵢ
-										end
-										for (x,x²,xdiv_τᵢ,w) ∈ zip(M.Ω, M.Ω², xdiv_τ, M.WHermite)) - log(_τᵢ)
+		# because this is an inner loop, economize by manually computing the log t pdf while avoiding redundant work
+		τᵢ² = τ[i]^2; _τᵢ² = 1+1/τᵢ²; sqrt_τᵢ² = √_τᵢ²
+		halfinv_τᵢ² = .5 / _τᵢ²
+		_νᵢ = ν[i]/2 + .5
+		D = (1 + τ[i]^2) * ν[i]
+		Cᵢ = log(p[i]) - logbeta(ν[i]/2,.5) - .5log(D)  # contains constant factor in t pdf, in logs
+		lnf_z₀_i(z₀) = logsumexp(begin  # log [∫_(-∞)^∞ ϕ(z₀;ω)t(ω;μ,τᵢ²,νᵢ)dω] sans ln Cᵢ factor
+												d = (z₀ - μ[i]) / sqrt_τᵢ²
+												lnwpx² - halfinv_τᵢ² * (x - d / τᵢ²)^2 - log1p((x + d)^2 / D) * _νᵢ
+											end
+											for (x,lnwpx²) ∈ zip(M.Ω, M.lnWpΩ²))
 
     Gᵢ = zero(T)
     for k ∈ eachindex(E)	# for each z₀ (Legendre integration point)
       t = E[k] + lnf_z₀_i(M.Z₀[k])
       Gᵢ += exp(t)
-		  B[k] = log(pHσm) + t
+		  B[k] = lnpHσm + t
     end
-    G += exp(C) * Gᵢ
+    G += exp(Cᵢ) * Gᵢ
 
 		Threads.@threads for j ∈ 1:M.k  # for each z value/interpolation point
 			@inbounds begin
-				t = M.modelabsz ? logsumexp(lnf_z₀_i(M.kts[j]), lnf_z₀_i(-M.kts[j])) : lnf_z₀_i(M.kts[j])
-				if pH < eps()
-					∫ⱼ = M.insig[j] ? t + tot_hacking[j] : t
+				lnf_z₀ᵢⱼ = M.modelabsz ? logsumexp(lnf_z₀_i(M.kts[j]), lnf_z₀_i(-M.kts[j])) : lnf_z₀_i(M.kts[j])
+				if pH < eps()  # special case of pH=0
+					∫ⱼ = M.insig[j] ? lnf_z₀ᵢⱼ + tot_hacking[j] : lnf_z₀ᵢⱼ
 				else
-					∫ⱼ = logsumexp(F[k,j] + B[k] for k ∈ eachindex(B))  # p-hacking contribution, integrating out z₀
 					if M.insig[j]  # component from using or reverting to initial measurement
-						∫ⱼ += log(pD)
-						∫ⱼ = logsumexp(∫ⱼ, t + tot_hacking[j])
+						if pD < eps()  # special case of pD=0
+							∫ⱼ = lnf_z₀ᵢⱼ + tot_hacking[j]
+						else
+							∫ⱼ = lnpD + logsumexp(F[k,j] + B[k] for k ∈ eachindex(B))  # p-hacking contribution, integrating out z₀
+							∫ⱼ = logsumexp(∫ⱼ, lnf_z₀ᵢⱼ + tot_hacking[j])
+						end
 					else
-						∫ⱼ = logsumexp(∫ⱼ, t)
+						∫ⱼ = logsumexp(F[k,j] + B[k] for k ∈ eachindex(B))  # p-hacking contribution, integrating out z₀
+						∫ⱼ = logsumexp(∫ⱼ, lnf_z₀ᵢⱼ)
 					end
 				end
-				∫[j,_i] = C + ∫ⱼ
+				∫[j,_i] = Cᵢ + ∫ⱼ
 			end
 		end
 	end
-  dropdims(logsumexp(∫; dims=2); dims=2), G
+  logsumexp!(tot_hacking, ∫), G  # sum across mixture components, into `tot_hacking` because it's the right size and already allocated
 end
 
 function HnFll(M::HnFmodel; pDFHR, kwargs...)
@@ -382,7 +389,7 @@ function HnFll(M::HnFmodel; pDFHR, kwargs...)
 	ℒ = (iszero(length(M.wt)) ? ThreadsX.sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -pDFHR[2]*G) + M.penalty(; pDFHR, kwargs...)
 end
 
-# d=3
+# d=2
 # M = HnFmodel(df.z; d, penalty)
 # from  = (p=fill(1/d,d), μ=fill(0.,d), τ=collect(LinRange(1,d,d)), ν=fill(1.,d), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        )
 # xform = (p=SimplextoRⁿ, μ=shared[d] , τ=bcast(log)              , ν=bcast(log), pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m))
@@ -390,15 +397,14 @@ end
 # fromxform = [xform[p](v) for (p,v) ∈ _from]
 # extractor = zip(keys(_from), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), fromxform, init=0))
 # xformer(x) = (p=>inverse(xform[p])(x[e]) for (p,e) ∈ extractor)  # map primary parameters into full model space, expressed as functions of optimization parameters, e.g. exp(log(σ))
-# θ = [-1.7655303584866269, 8.123865436615936e-14, -0.18977382289726658, -0.1331314644657601, 0.6419835764032653, 1.1675135711216456, 1.85924816195406, 0.14059294436402978, 3.980402925828119, -0.12322025745608395, -0.5740791911090786, 7.163335876771183e-17, -0.14712402425465324, -0.06720184894319305]
+# θ = [2.8123470357990914e-17, 0.6173538377032312, -9.15444500478053e-11, 0.7312615572740234, -1.0240747719731436, 1.244405012382585, -2.936968699818347e-19, 4.928474481510266e-18, -0.43925678184501615, -1.2341876491387207, -2.2740226191270536]
 # params = collect(xformer(θ))
 # objective(x) = -HnFll(M; xformer(x)...)
-# ForwardDiff.hessian(objective, θ)
-
-# HnFll(M;params...)
-# Profile.Allocs.clear()
-# Profile.Allocs.@profile sample_rate=.01 HnFll(M;params...)
-# PProf.Allocs.pprof(from_c=false)
+# @btime ForwardDiff.gradient(objective, θ)
+# # HnFll(M;params...)
+# # Profile.Allocs.clear()
+# # Profile.Allocs.@profile sample_rate=.01 HnFll(M;params...)
+# # PProf.Allocs.pprof(from_c=false)
 
 # simulate hack'n'file data generating process with integer m
 # returns named tuple of true z's (ω), initial measurements (z✻), and reported results
@@ -528,7 +534,7 @@ end
 
 # set up and fit model
 # any extra keyword arguments are passed to Optim.Options
-function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLegendre::Int=50, NHermite::Int=35, from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
+function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLegendre::Int=50, NHermite::Int=25, from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
 									methods::Vector=[NewtonTrustRegion()], estname="", modelabsz::Bool=false, penalty::Function=(; kwargs...)->0., kwargs...)
 
 	println("\nModeling $estname data with $d mixture component(s)")
@@ -584,6 +590,7 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLe
 	H = ForwardDiff.hessian(objective, θ)  # Hessian of log likelihood wrt optimization parameters
 	Vxform = try pinv(H) catch _ fill(NaN, size(H)) end  # covariance matrix of optimization parameters
 	vcov = Δ * Vxform * Δ'  # covariance matrix of full model parameters
+	vcov[diagind(vcov)] .= max.(0, vcov[diagind(vcov)])
 
 	# se = NamedTuple([p=> iszero(length(e)) ? zeros(length(inverse(xform[p])(θ[e]))) :
 	# 											(e isa Int ? ForwardDiff.derivative : ForwardDiff.jacobian)(inverse(xform[p]), θ[e]) |>
@@ -735,13 +742,13 @@ sim = HnFDGP(n; kwargs...)
 
 f = Figure()
 Axis(f[1,1], limits=(modelabsz ? 0 : -10, 10, nothing,nothing))
-hist!(sim.z✻[abs.(sim.z✻).<100], bins=100*2*100, normalization=:pdf)
+hist!(sim.z✻[abs.(sim.z✻).<100], bins=10*2*100, normalization=:pdf)
 zplot = (modelabsz ? 0 : -10):.01:10
 lines!(zplot, fZ(zplot; NHermite=35, kwargs...), color=:orange, label="True parameters")
 f|>display
 
 penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(m[])) + logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
-res = HnFfit(sim.z✻; d, modelabsz, penalty, estname="simulated", m=m), extended_trace=false)  # penalized maximum likelihood
+res = HnFfit(sim.z✻; d, modelabsz, penalty, estname="simulated", extended_trace=false)  # penalized maximum likelihood
 print(res.coefdict)
 lines!(zplot, fZ(zplot; modelabsz, res.coefdict...)[:,1], color=:green, label="Estimated parameters")
 
@@ -766,17 +773,6 @@ f |> display
   results = [HnFfit(df.z; d, penalty, estname="vZZS$d") for d ∈ 1:3]
 	vZSS = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, vZSS; title="van Zwet, Schwab, and Senn (2021) data")
-
-	# Georgescu and Wren 2018 ~1M sample, doi:10.1093/bioinformatics/btx811, https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData
-	df = DataFrame(RData.load("data/Georgescu and Wren 2018/Georgescu.Wren.RData")["complete"])
-	@. df.ci_level[ismissing(df.ci_level) || df.ci_level==.0095 || df.ci_level==.05] = .95
-	@. df.z = log(df.mean) / (ifelse(ismissing(df.lower) || iszero(df.lower), log(df.upper / df.mean), log(df.upper / df.lower) / 2) / cquantile(𝒩, (1 - df.ci_level)/2))
-	@. @subset!(df, !ismissing(:z) && !ismissing(:lower) && iszero(:mistake) && abs(:z)<10.)  # van Zwet & Cator Figure 1 stops at 10
-	# @. @subset!(df, :source!="Abstract")
-	results = [HnFfit(df.z;            d, penalty, interpres=1000          , estname="GW$d") for d ∈ 1:3]
-	results = [HnFfit(df.z; results[d].d, penalty, from=results[d].coefdict, estname="GW$d") for d ∈ 1:3]
-	GW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
-	HnFplot(df.z, GW; title="Georgescu and Wren (2018) data")
 
 	# Schuemie et al. (2013), https://onlinelibrary.wiley.com/action/downloadSupplement?doi=10.1002%2Fsim.5925&file=Appendix+G+Revision.xlsx
 	df = DataFrame(XLSX.readtable("data/Schuemie et al. 2013/appendix g revision.xlsx", "NeatTable", first_row=2, infer_eltypes=true)...)
@@ -831,6 +827,17 @@ f |> display
 	results = [HnFfit(df.z; d, penalty, estname="GM$d") for d ∈ 1:3]
 	GM = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, GM; title="Gerber & Malhotra (2008) data")
+
+	# Georgescu and Wren 2018 ~1M sample, doi:10.1093/bioinformatics/btx811, https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData
+	df = DataFrame(RData.load("data/Georgescu and Wren 2018/Georgescu.Wren.RData")["complete"])
+	@. df.ci_level[ismissing(df.ci_level) || df.ci_level==.0095 || df.ci_level==.05] = .95
+	@. df.z = log(df.mean) / (ifelse(ismissing(df.lower) || iszero(df.lower), log(df.upper / df.mean), log(df.upper / df.lower) / 2) / cquantile(𝒩, (1 - df.ci_level)/2))
+	@. @subset!(df, !ismissing(:z) && !ismissing(:lower) && iszero(:mistake) && abs(:z)<10.)  # van Zwet & Cator Figure 1 stops at 10
+	# @. @subset!(df, :source!="Abstract")
+	results = [HnFfit(df.z;            d, penalty, interpres=1000          , estname="GW$d") for d ∈ 1:3]  # approximate fits by interpolating loglik over z
+	results = [HnFfit(df.z; results[d].d, penalty, from=results[d].coefdict, estname="GW$d") for d ∈ 1:3]
+	GW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
+	HnFplot(df.z, GW; title="Georgescu and Wren (2018) data")
 
 	table = regtable(GW, Setal, GM, SW, BCH, ABetal, vZSS, V;
 							estim_decoration = (coef,p)->coef,  # no stars
