@@ -816,7 +816,7 @@ f |> display
 	GM = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, GM; title="Gerber & Malhotra (2008) data")
 
-	# Georgescu and Wren 2018 ~1M sample, doi:10.1093/bioinformatics/btx811, https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData
+	# Barnet and Wren 2019 ~1M sample, DOI: 10.1136/bmjopen-2019-032506, https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData
 	df = DataFrame(RData.load("data/Georgescu and Wren 2018/Georgescu.Wren.RData")["complete"])
 	@. df.ci_level[ismissing(df.ci_level) || df.ci_level==.0095 || df.ci_level==.05] = .95
 	@. df.z = log(df.mean) / (ifelse(ismissing(df.lower) || iszero(df.lower), log(df.upper / df.mean), log(df.upper / df.lower) / 2) / cquantile(𝒩, (1 - df.ci_level)/2))
@@ -824,10 +824,10 @@ f |> display
 	# @. @subset!(df, :source!="Abstract")
 	results = [HnFfit(df.z;            d, penalty, interpres=1000          , estname="GW$d") for d ∈ 1:3]  # approximate fits by interpolating loglik over z
 	results = [HnFfit(df.z; results[d].d, penalty, from=results[d].coefdict, estname="GW$d") for d ∈ 1:3]
-	GW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
-	HnFplot(df.z, GW; title="Georgescu and Wren (2018) data")
+	BW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
+	HnFplot(df.z, BW; title="Barnett and Wren (2019) data")
 
-	table = regtable(GW, Setal, GM, SW, BCH, ABetal, vZSS, V;
+	table = regtable(BW, Setal, GM, SW, BCH, ABetal, vZSS, V;
 							estim_decoration = (coef,p)->coef,  # no stars
 							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
