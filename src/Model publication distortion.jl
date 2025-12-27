@@ -660,8 +660,8 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre::Int=50, NHermite::Int=
 		lb = linear_interpolation(CIs[:,1],zplot)(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
 		ub = linear_interpolation(CIs[:,3],zplot)(0.)
 		scatter!([lb;ub],[0.;0], color=Makie.wong_colors()[6])
-		text!(lb, 0., text=format("{:03.2f}", lb), align=(:right, :bottom))
-		text!(ub, 0., text=format("{:03.2f}", ub), align=(:left, :top))
+		text!(lb, 0., text=format("{:03.2f}", lb), align=(:right, :bottom), fontsize=18)
+		text!(ub, 0., text=format("{:03.2f}", ub), align=(:left, :top), fontsize=18)
 	catch e
 	end
 	axislegend(position=:lt, framevisible = false)
@@ -681,10 +681,10 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre::Int=50, NHermite::Int=
 	lines!(zplot[zplot.>.2], Float16.(pplot[zplot.>.2]./zplot[zplot.>.2]), label="updating from prior + research distortion", color=Makie.wong_colors()[6])
   y = EΩcondZ([2]; kwargsω..., kwargsz0..., NLegendre, NHermite)[] / 2
   scatter!(2, y, color=Makie.wong_colors()[1])
-	text!(2, y, text=format("{:03.2f}", y), align=(:center, :bottom))
+	text!(2, y, text=format("{:03.2f}", y), align=(:center, :bottom), fontsize=18)
   y = EΩcondZ([2]; kwargsω..., kwargsz... , NLegendre, NHermite)[] / 2
   scatter!(2, y, color=Makie.wong_colors()[6])
-	text!(2, y, text=format("{:03.2f}", y), align=(:center, :top))
+	text!(2, y, text=format("{:03.2f}", y), align=(:center, :top), fontsize=18)
   axislegend(position=:lt, framevisible = false)
 
 	title=="" || (f[0, 1:3] = Label(f, title))
