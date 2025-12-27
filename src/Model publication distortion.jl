@@ -6,7 +6,7 @@ Pkg.activate(".")  # activate this project's environment
 Pkg.instantiate()  # make sure all packages installed
 
 using Random, IrrationalConstants, Format, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature, Optim, LogExpFunctions, CSV, DataFrames, DataFramesMeta, ForwardDiff, LinearAlgebra, Roots, QuadGK, Statistics, 
-       InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions, ThreadsX
+       InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions, ThreadsX, HCubature
 
 const 𝒩 = Normal()
 const z̄ = quantile(𝒩, .975)  # 1.96
@@ -209,7 +209,7 @@ quantFcondΩ(q, ω; kwargs...) = find_zero(z -> q - FZcondΩ(z, ω; kwargs...), 
 
 # likelihood for a collection (vector, step range) of z's for plotting
 # If truncate=true (default), returns the truncated density, i.e., conditional on publication
-function fZ(z; modelabsz=false, NHermite=35, NLegendre=50, p, μ, τ, ν, pDFHR, σ, m, truncate=true)
+function fZ(z; modelabsz=false, NHermite=25, NLegendre=50, p, μ, τ, ν, pDFHR, σ, m, truncate=true)
   M = HnFmodel(z; d=length(τ), NHermite, NLegendre, modelabsz)
   ∫, G = _HnFll(M; p,μ,τ,ν,pDFHR,σ,m)
 	∫ .= exp.(∫)
@@ -221,8 +221,8 @@ end
 # f(z), f(ω), f(ω|z), E[ω|z]
 # inconsistency: z should be a scalar for fΩcondZ but a vector or other iterable for EΩcondZ
 fΩ(ω; p, μ, τ, ν) = sum(pᵢ * pdf(GenT(μᵢ,τᵢ,νᵢ), ω) for (pᵢ, μᵢ, τᵢ, νᵢ) ∈ zip(p, μ, τ, ν))
-fΩcondZ(ω, z; p, μ, τ, ν, NHermite=35, NLegendre=50, kwargs...) = fZcondΩ(z, ω; NLegendre, kwargs..., truncate=false) * fΩ(ω; p, μ, τ, ν) / fZ([z]; p, μ, τ, ν, kwargs..., NLegendre, NHermite, truncate=false)[]
-EΩcondZ(z; rtol=.00001, maxevals=1e4, p, μ, τ, ν, NHermite=35, NLegendre=50, kwargs...) = [quadgk(ω -> ω * fZcondΩ(zᵢ, ω; kwargs..., NLegendre, truncate=false) * fΩ(ω; p, μ, τ, ν), -20, 20; rtol, maxevals)[1] for zᵢ∈z] ./ 
+fΩcondZ(ω, z; p, μ, τ, ν, NHermite=25, NLegendre=50, kwargs...) = fZcondΩ(z, ω; NLegendre, kwargs..., truncate=false) * fΩ(ω; p, μ, τ, ν) / fZ([z]; p, μ, τ, ν, kwargs..., NLegendre, NHermite, truncate=false)[]
+EΩcondZ(z; rtol=.00001, maxevals=1e4, p, μ, τ, ν, NHermite=25, NLegendre=50, kwargs...) = [quadgk(ω -> ω * fZcondΩ(zᵢ, ω; kwargs..., NLegendre, truncate=false) * fΩ(ω; p, μ, τ, ν), -20, 20; rtol, maxevals)[1] for zᵢ∈z] ./ 
                                                                       fZ(z; p, μ, τ, ν, kwargs..., NLegendre, NHermite, truncate=false)
 
 # CIs
@@ -239,7 +239,7 @@ struct HnFmodel
 	N::Int  # number of z's in data, # of insignificant
 	k::Int  # number of z knots for interpolation
 	interpolate::Bool	# interpolation resolution (points per unit interval); 0 means no interpolation
-	kts::Vector{Float64}  # interpolation knots in z space
+	kts::Vector{Float64}  # interpolation knots/observations in z space
 	insig::BitVector  # which knots are in insignificant region
 	splinetype::Interpolations.InterpolationType  # type of interpolation
 	zint::Vector{Float64}  # z values mapped to cardinal knot numbering space since interpolate() is faster with cardinally spaced knots
@@ -254,7 +254,7 @@ struct HnFmodel
 	tot_hacking_dict::Dict{DataType, Vector}
 	∫dict::Dict{DataType, Matrix}
 
-	function HnFmodel(z, wt=Float64[]; d::Int, modelabsz::Bool=false, interpres::Int=0, NHermite::Int=35, NLegendre::Int=50, splinetype::Interpolations.InterpolationType=BSpline(Linear()), 
+	function HnFmodel(z, wt=Float64[]; d::Int, modelabsz::Bool=false, interpres::Int=0, NHermite::Int=25, NLegendre::Int=50, splinetype::Interpolations.InterpolationType=BSpline(Linear()), 
                     penalty::Function=(; kwargs...)->0.)
 		if iszero(interpres)
 			kts = z
@@ -460,7 +460,7 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 	end
 
 	if truncate
-		keep = @. !isnan(z✻) && abs(z✻)<10
+		keep = @. !isnan(z✻) # && abs(z✻)<10
 		ω, z₀, z✻  = ω[keep], z₀[keep], z✻[keep]
 	end
 	(ω=ω, z₀=z₀, z✻=z✻)
@@ -532,6 +532,7 @@ begin
 	Base.repr(render::AbstractRenderType, x::Converged; args...) = RegressionTables.value(x) ? "Yes" : "No"
 end
 
+
 # set up and fit model
 # any extra keyword arguments are passed to Optim.Options
 function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLegendre::Int=50, NHermite::Int=25, from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
@@ -565,14 +566,15 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLe
 	coefdict_maker(v) = NamedTuple(p=>inverse(xform[p])(v[e]) for (p,e) ∈ extractor)
 	coefdict = coefdict_maker(θ)
 
-	function derived_stats(; p, μ, τ, ν, pDFHR, σ, m)
+	function derived_stats(; p,μ,τ,ν,pDFHR,σ,m)
 		pD, pF, pH, pR = pDFHR
 
-		G = _HnFll(HnFmodel([0.]; d); p,μ,τ,ν,pDFHR,σ,m)[2]
-
-		I₀ = sum(pᵢ * sum(w_ω * w_z₀ * pdf(GenT(μᵢ,τᵢ,νᵢ), ω + z₀) for (ω , w_ω ) ∈ zip(M.Ω , M.WHermite)
-					                                                     for (z₀, w_z₀) ∈ zip(M.Z₀, M.WLegendre))
-																														   for (pᵢ, μᵢ,τᵢ,νᵢ) ∈ zip(p,μ,τ,ν))  # fraction initially insignificant
+		f(v) = ((ω,z₀)=v; pdf(𝒩,z₀ - ω) * p'pdf.(GenT.(μ,τ,ν), ω))  # f(z₀)
+		g(v) = ((_,z₀)=v; f(v) / (1 - pH * diffcdf(Normal(z₀,σ[]),z̄,-z̄)))  # f * "shots on goal"
+		I₀   = hcubature(f, [-100,-z̄], [100, z̄])[1] 
+		S₂₄  = hcubature(f, [-100,-4], [100,-2])[1] + hcubature(f, [-100,2], [100,4])[1]  # actually marginally significant
+		G    = hcubature(g, [-100,-z̄], [100, z̄])[1] 
+		Sh₂₄ = pH * hcubature(v -> ((ω,z₀)=v; g(v) * (diffcdf(Normal(z₀,σ[]),4,-4)^m[] - diffcdf(Normal(z₀,σ[]),2,-2)^m[])), [-100,-z̄], [100,z̄])[1]  # p-hacked "marginally significant"
 
 		[
 			pF*G / I₀                     # fraction of insignificant studies file-drawered
@@ -583,6 +585,7 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLe
 
 			(I₀ - (1-pH)*G) / (1 - pF*G)  # fraction of significant results that are p-hacked
 			pD * (G - I₀) / (1 - pF*G)    # fraction of insignificant results that are p-hacked
+			Sh₂₄ / (Sh₂₄ + S₂₄)           # p-hacked fraction of "marginally significant" in Star Wars (2<|z|<4)
 		]
 	end
 
@@ -609,13 +612,47 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLe
 	end
 
 	one2D = first(Unicode.graphemes("₁₂₃₄"),d)
-	coefnames = vcat("p".*one2D, "μ".*one2D, "τ".*one2D, "ν".*one2D, "pD", "pF", "pH", "pR", "σ", "m", "fraction_insignificant_file_drawered", "overall_file_drawer_fraction", 
-										 "fraction_insignificant_published_as_is", "significant_p_hacked_fraction", "insignificant_p_hacked_fraction",
-										 "fraction_published_insignificant_p_hacked", "fraction_significant_p_hacked")
+	coefnames = vcat("p".*one2D, "μ".*one2D, "τ".*one2D, "ν".*one2D, "pD", "pF", "pH", "pR", "σ", "m", "frac_insig_file_drawered", "overall_file_drawer_frac", 
+										 "frac_insig_pubbed_as_is", "sig_p_hacked_frac", "insig_p_hacked_frac",
+										 "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig")
 
 	G = _HnFll(M; coefdict...)[2]
 	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), d, ll=-Optim.minimum(res))
 end
+
+# checks
+# p,μ,τ,ν,pDFHR,σ,m = res.coefdict.p, res.coefdict.μ, res.coefdict.τ, res.coefdict.ν,res.coefdict.pDFHR, res.coefdict.σ, round.(res.coefdict.m)
+# pD, pF, pH, pR = pDFHR
+# σ[]=1.2
+
+# ff(v) = ((ω,z₀)=v; pdf(𝒩,z₀-ω) * p'pdf.(GenT.(μ,τ,ν), ω))
+# g(v) = ((_,z₀)=v; ff(v) / (1 - pH * diffcdf(Normal(z₀,σ[]),z̄,-z̄)))
+# I₀   = hcubature(ff, [-100,-z̄], [100,z̄])[1]  # Pr[|z₀|≤z̄] = ∫_(-z ̅)^z ̅▒〖f_(Z_0 ) (z_0 )dz_0 〗
+# S₂₄  = hcubature(ff, [-100,-4], [100,-2])[1] + hcubature(ff, [-100, 2], [100, 4])[1]  # actually marginally significant
+# G    = hcubature(g, [-100,-z̄], [100,z̄])[1]  # f * "shots on goal"
+# Sh₂₄ = hcubature(v -> ((ω,z₀)=v; g(v) * pH * (diffcdf(Normal(z₀,σ[]),4,-4)^m[] - diffcdf(Normal(z₀,σ[]),2,-2)^m[])), [-100,-z̄], [100,z̄])[1]  # p-hacked "marginally significant"
+
+# n = 10_000_000
+# sim = HnFDGP(n; p,μ,τ,ν,pDFHR,σ,m,truncate=false)
+
+# # Latent: fraction of insignificant results terminating in each of the boxes
+# n✻ = sum(@. !isnan(sim.z✻))  # number of published studies
+# Ĩ₀ = (sum(@. abs(sim.z₀)<z̄))/n	; I₀,Ĩ₀ # fraction initial insignificant
+# 1-I₀, mean(@. abs(sim.z₀)>z̄)  # fraction initially, legitimately significiant
+
+# pF*G / I₀, (n-n✻)/(Ĩ₀*n)  # fraction of insignificant studies file-drawered
+# pF*G, (n-n✻)/n  # fraction of all studies file-drawered
+# pR*G / I₀ + pD, sum(@. sim.z✻==sim.z₀ && abs(sim.z₀)<z̄) / (Ĩ₀*n)  # fraction insignificant published as is
+# 1-pD - (1-pH-pD)*G/I₀, sum(@. sim.z✻!=sim.z₀) /(Ĩ₀*n)  # fraction insignificant p-hacked & published
+# 1 - (1-pH)*G/I₀, sum(@. sim.z✻!=sim.z₀ && abs(sim.z✻)>z̄) / (Ĩ₀*n)  # fraction of initial insignificant results that are successfully p-hacked
+# pD * (G - I₀)/I₀, sum(@. sim.z✻!=sim.z₀ && abs(sim.z✻)≤z̄) / (Ĩ₀*n)  # fraction of initial insignificant results that are p-hacked, fail to reach significance, and are published anyway
+
+# (I₀ - (1-pH)*G) / (1 - pF*G), sum(@. abs(sim.z✻)>z̄ && sim.z✻!=sim.z₀) / n✻  # fraction of significant results that are p-hacked
+# pD * (G - I₀) / (1 - pF*G), sum(@. abs(sim.z✻)≤z̄ && sim.z✻!=sim.z₀) / n✻  # fraction of insignificant results that are p-hacked
+
+# mean(@. abs(sim.z₀)≤z̄ && 2≤abs(sim.z✻)≤4), Sh₂₄  # p-hacked "marginally significant"
+# sum(@. abs(sim.z₀)≤z̄ && 2≤abs(sim.z✻)≤4)/sum(@. 2≤abs(sim.z✻)≤4), Sh₂₄/(Sh₂₄+S₂₄)  # p-hacked fraction of marginally significant
+
 
 function HnFplot(z, est, wt::Vector=Float64[]; NLegendre::Int=50, NHermite::Int=50, zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
 	t = est.coefdict
@@ -634,7 +671,7 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre::Int=50, NHermite::Int=
 
   pplottrue                     = map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν),  z)), _zplot)
   est.modelabsz && (pplottrue .+= map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν), -z)), _zplot))
-	pplottrue ./= 1 - est.coef[findfirst(==("overall_file_drawer_fraction"), est.coefnames)]
+	pplottrue ./= 1 - est.coef[findfirst(==("overall_file_drawer_frac"), est.coefnames)]
 
 	pplotinitial = fZ(_zplot; kwargsω..., kwargsz0..., modelabsz=est.modelabsz, NLegendre, NHermite)
 	pplotfit     = fZ(_zplot; kwargsω..., kwargsz ..., modelabsz=est.modelabsz, NLegendre, NHermite)
@@ -744,7 +781,7 @@ f = Figure()
 Axis(f[1,1], limits=(modelabsz ? 0 : -10, 10, nothing,nothing))
 hist!(sim.z✻[abs.(sim.z✻).<100], bins=10*2*100, normalization=:pdf)
 zplot = (modelabsz ? 0 : -10):.01:10
-lines!(zplot, fZ(zplot; NHermite=35, kwargs...), color=:orange, label="True parameters")
+lines!(zplot, fZ(zplot; NHermite=25, kwargs...), color=:orange, label="True parameters")
 f|>display
 
 penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(m[])) + logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
@@ -843,7 +880,7 @@ f |> display
 							estim_decoration = (coef,p)->coef,  # no stars
 							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
-							keep = ["p₁", "p₂", "p₃", "p₄", "μ₁", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pH", "pD", "pR", "σ", "m", "fraction_insignificant_file_drawered", "fraction_insignificant_published_as_is", "fraction_published_insignificant_p_hacked", "fraction_significant_p_hacked"],
+							keep = ["p₁", "p₂", "p₃", "p₄", "μ₁", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pH", "pD", "pR", "σ", "m", "frac_insig_file_drawered", "frac_insig_pubbed_as_is", "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig"],
 							estimformat = "%0.3g",
 							statisticformat = "%0.3g",
 							number_regressions = false,
