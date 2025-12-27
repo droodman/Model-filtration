@@ -389,22 +389,6 @@ function HnFll(M::HnFmodel; pDFHR, kwargs...)
 	ℒ = (iszero(length(M.wt)) ? ThreadsX.sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -pDFHR[2]*G) + M.penalty(; pDFHR, kwargs...)
 end
 
-# d=2
-# M = HnFmodel(df.z; d, penalty)
-# from  = (p=fill(1/d,d), μ=fill(0.,d), τ=collect(LinRange(1,d,d)), ν=fill(1.,d), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        )
-# xform = (p=SimplextoRⁿ, μ=shared[d] , τ=bcast(log)              , ν=bcast(log), pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m))
-# _from = pairs(from)
-# fromxform = [xform[p](v) for (p,v) ∈ _from]
-# extractor = zip(keys(_from), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), fromxform, init=0))
-# xformer(x) = (p=>inverse(xform[p])(x[e]) for (p,e) ∈ extractor)  # map primary parameters into full model space, expressed as functions of optimization parameters, e.g. exp(log(σ))
-# θ = [2.8123470357990914e-17, 0.6173538377032312, -9.15444500478053e-11, 0.7312615572740234, -1.0240747719731436, 1.244405012382585, -2.936968699818347e-19, 4.928474481510266e-18, -0.43925678184501615, -1.2341876491387207, -2.2740226191270536]
-# params = collect(xformer(θ))
-# objective(x) = -HnFll(M; xformer(x)...)
-# @btime ForwardDiff.gradient(objective, θ)
-# # HnFll(M;params...)
-# # Profile.Allocs.clear()
-# # Profile.Allocs.@profile sample_rate=.01 HnFll(M;params...)
-# # PProf.Allocs.pprof(from_c=false)
 
 # simulate hack'n'file data generating process with integer m
 # returns named tuple of true z's (ω), initial measurements (z✻), and reported results
@@ -619,39 +603,6 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d::Int=1, interpres::Int=0, NLe
 	G = _HnFll(M; coefdict...)[2]
 	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), d, ll=-Optim.minimum(res))
 end
-
-# checks
-# p,μ,τ,ν,pDFHR,σ,m = res.coefdict.p, res.coefdict.μ, res.coefdict.τ, res.coefdict.ν,res.coefdict.pDFHR, res.coefdict.σ, round.(res.coefdict.m)
-# pD, pF, pH, pR = pDFHR
-# σ[]=1.2
-
-# ff(v) = ((ω,z₀)=v; pdf(𝒩,z₀-ω) * p'pdf.(GenT.(μ,τ,ν), ω))
-# g(v) = ((_,z₀)=v; ff(v) / (1 - pH * diffcdf(Normal(z₀,σ[]),z̄,-z̄)))
-# I₀   = hcubature(ff, [-100,-z̄], [100,z̄])[1]  # Pr[|z₀|≤z̄] = ∫_(-z ̅)^z ̅▒〖f_(Z_0 ) (z_0 )dz_0 〗
-# S₂₄  = hcubature(ff, [-100,-4], [100,-2])[1] + hcubature(ff, [-100, 2], [100, 4])[1]  # actually marginally significant
-# G    = hcubature(g, [-100,-z̄], [100,z̄])[1]  # f * "shots on goal"
-# Sh₂₄ = hcubature(v -> ((ω,z₀)=v; g(v) * pH * (diffcdf(Normal(z₀,σ[]),4,-4)^m[] - diffcdf(Normal(z₀,σ[]),2,-2)^m[])), [-100,-z̄], [100,z̄])[1]  # p-hacked "marginally significant"
-
-# n = 10_000_000
-# sim = HnFDGP(n; p,μ,τ,ν,pDFHR,σ,m,truncate=false)
-
-# # Latent: fraction of insignificant results terminating in each of the boxes
-# n✻ = sum(@. !isnan(sim.z✻))  # number of published studies
-# Ĩ₀ = (sum(@. abs(sim.z₀)<z̄))/n	; I₀,Ĩ₀ # fraction initial insignificant
-# 1-I₀, mean(@. abs(sim.z₀)>z̄)  # fraction initially, legitimately significiant
-
-# pF*G / I₀, (n-n✻)/(Ĩ₀*n)  # fraction of insignificant studies file-drawered
-# pF*G, (n-n✻)/n  # fraction of all studies file-drawered
-# pR*G / I₀ + pD, sum(@. sim.z✻==sim.z₀ && abs(sim.z₀)<z̄) / (Ĩ₀*n)  # fraction insignificant published as is
-# 1-pD - (1-pH-pD)*G/I₀, sum(@. sim.z✻!=sim.z₀) /(Ĩ₀*n)  # fraction insignificant p-hacked & published
-# 1 - (1-pH)*G/I₀, sum(@. sim.z✻!=sim.z₀ && abs(sim.z✻)>z̄) / (Ĩ₀*n)  # fraction of initial insignificant results that are successfully p-hacked
-# pD * (G - I₀)/I₀, sum(@. sim.z✻!=sim.z₀ && abs(sim.z✻)≤z̄) / (Ĩ₀*n)  # fraction of initial insignificant results that are p-hacked, fail to reach significance, and are published anyway
-
-# (I₀ - (1-pH)*G) / (1 - pF*G), sum(@. abs(sim.z✻)>z̄ && sim.z✻!=sim.z₀) / n✻  # fraction of significant results that are p-hacked
-# pD * (G - I₀) / (1 - pF*G), sum(@. abs(sim.z✻)≤z̄ && sim.z✻!=sim.z₀) / n✻  # fraction of insignificant results that are p-hacked
-
-# mean(@. abs(sim.z₀)≤z̄ && 2≤abs(sim.z✻)≤4), Sh₂₄  # p-hacked "marginally significant"
-# sum(@. abs(sim.z₀)≤z̄ && 2≤abs(sim.z✻)≤4)/sum(@. 2≤abs(sim.z✻)≤4), Sh₂₄/(Sh₂₄+S₂₄)  # p-hacked fraction of marginally significant
 
 
 function HnFplot(z, est, wt::Vector=Float64[]; NLegendre::Int=50, NHermite::Int=50, zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
