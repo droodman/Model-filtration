@@ -6,10 +6,10 @@ The program produces output like this ("true z" = signal-to-noise ratio):
 <img width="799" alt="image" src="https://github.com/droodman/Model-filtration/blob/main/output/GW3%20all.png" />
 
 # Model
-<img width="748" height="523" alt="image" src="https://github.com/user-attachments/assets/91348728-775b-4fbf-8a15-10b933b444bc" />
+<img width="775" height="773" alt="image" src="https://github.com/user-attachments/assets/30e24129-d3b1-42ad-8189-8e5da08a0f40" />
 
 # Likelihood
-<img width="1125" height="333" alt="image" src="https://github.com/user-attachments/assets/607b827b-a033-4c74-8aec-f5702396a67b" />
+<img width="748" height="523" alt="image" src="https://github.com/user-attachments/assets/91348728-775b-4fbf-8a15-10b933b444bc" />
 
 # Numerical results
 Each column is for a different data set of _z_ statistics:
