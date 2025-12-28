@@ -236,13 +236,8 @@ struct HnFmodel
 	d::Vector{Int}  # number of mixture components; scalar stored as mutable vector
 	z::Vector{Float64}  # all data
 	wt::Vector{Float64}  # observation weights
-	N::Int  # number of z's in data, # of insignificant
-	k::Int  # number of z knots for interpolation
-	interpolate::Bool	# interpolation resolution (points per unit interval); 0 means no interpolation
-	kts::Vector{Float64}  # interpolation knots/observations in z space
-	insig::BitVector  # which knots are in insignificant region
-	splinetype::Interpolations.InterpolationType  # type of interpolation
-	zint::Vector{Float64}  # z values mapped to cardinal knot numbering space since interpolate() is faster with cardinally spaced knots
+	N::Int  # number of z's in data
+	insig::BitVector  # which z's are in insignificant region
 	NHermite::Int  # number of quadrature points for integration over z₀ to compute f(z₀)
 	Ω::Vector{Float64}; WHermite::Vector{Float64}; lnWpΩ²::Vector{Float64}  # quadrature nodes & weights
 	NLegendre::Int  # number of quadrature points
@@ -254,24 +249,14 @@ struct HnFmodel
 	tot_hacking_dict::Dict{DataType, Vector}
 	∫dict::Dict{DataType, Matrix}
 
-	function HnFmodel(z, wt=Float64[]; d::Int, modelabsz=false, interpres=0, NHermite=50, NLegendre=50, splinetype::Interpolations.InterpolationType=BSpline(Linear()), 
-                    penalty::Function=(; kwargs...)->0.)
-		if iszero(interpres)
-			kts = z
-			zint = Float64[]
-		else
-			e = max(10, maximum(abs.(extrema(z)))) + .2  # interpolation knots span a bit beyond [-10,10] to avoid edge effects; symmetric start at 0 if modelabsz=true
-			kts = (modelabsz ? -.2 : -e) : 1/interpres : e  # LinRange(modelabsz ? 0 : -e, e, (2-modelabsz) * ceil(Int, e * interpres) + 1)
-			zint = (z .- first(kts)) .* interpres .+ 1
-		end
-
+	function HnFmodel(z, wt=Float64[]; d::Int, modelabsz=false, NHermite=50, NLegendre=50, penalty::Function=(; kwargs...)->0.)
 		Ω, WHermite = gausshermite(NHermite)
 		Ω .= √2 .* Ω; WHermite ./= √π  # fold in adjustment for change of variables from pdf(Normal(ω)) to exp(-x²)
 
 		Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
 		Z₀ .*= z̄; W .*= z̄  # change of variables to quadrature over [-z̄, z̄]
 		
-		new(modelabsz, [d], z, wt/mean(wt), length(z), length(kts), interpres!=0, kts, -z̄ .≤ kts .≤ z̄, splinetype, zint, NHermite, Ω, WHermite, log.(WHermite).+.5Ω.^2, NLegendre, Z₀, W, log.(W), penalty, Dict(), Dict(), Dict(), Dict(), Dict())
+		new(modelabsz, [d], z, wt/mean(wt), length(z), -z̄.≤z.≤z̄, NHermite, Ω, WHermite, log.(WHermite).+.5Ω.^2, NLegendre, Z₀, W, log.(W), penalty, Dict(), Dict(), Dict(), Dict(), Dict())
 	end
 end
 
@@ -291,28 +276,28 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 	lnpHσm = lnpH + log(m[] / σ[])
 	mm1 = m[] - 1
 
-	z̄divσ, zdivσ, Z₀divσ = z̄/σ[], M.kts/σ[], M.Z₀/σ[]
+	z̄divσ, zdivσ, Z₀divσ = z̄/σ[], M.z/σ[], M.Z₀/σ[]
 
 	is = findall(>(1e-6), p)  # nonzero mixture components
 	_d = length(is)
 
 	# pre-allocating these hampers automatic differentiation because they depend on T, which could be a Dual number
-	∫ = _d<M.d[] ? Matrix{T}(undef,M.k,_d) : get!(M.∫dict, T, Matrix{T}(undef,M.k,_d))  # likelihood contributions for each z knot and each mixture component
+	∫ = _d<M.d[] ? Matrix{T}(undef,M.N,_d) : get!(M.∫dict, T, Matrix{T}(undef,M.N,_d))::Matrix{T}  # likelihood contributions for each z knot and each mixture component
 	G = zero(T)	 # accumulator for expected number of publish/file-drawer/p-hack decision junctures
-	B = get!(M.Bdict, T, Vector{T}(undef, M.NLegendre))
-	F = get!(M.Fdict, T, Matrix{T}(undef, M.NLegendre, M.k))  # ϕ(z;z_0,σ^2 ) 〖ΔΦ(|z|,-|z|;z_0,σ^2 )〗^(m-1) for each z and each z₀ (Legendre integration point)
-  tot_hacking = get!(M.tot_hacking_dict, T, Vector{T}(undef,M.k))
+	B = get!(M.Bdict, T, Vector{T}(undef, M.NLegendre))::Vector{T}
+	F = get!(M.Fdict, T, Matrix{T}(undef, M.NLegendre, M.N))::Matrix{T}  # ϕ(z;z_0,σ^2 ) 〖ΔΦ(|z|,-|z|;z_0,σ^2 )〗^(m-1) for each z and each z₀ (Legendre integration point)
+  tot_hacking = get!(M.tot_hacking_dict, T, Vector{T}(undef,M.N))::Vector{T}
 
   if pH < eps()
     E = M.lnWLegendre
   else
-    E = get!(M.Edict, T, Vector{T}(undef,M.NLegendre))  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) ) for each z₀ (Legendre integration point)
+    E = get!(M.Edict, T, Vector{T}(undef,M.NLegendre))::Vector{T}  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) ) for each z₀ (Legendre integration point)
     for k ∈ eachindex(E)  # for each Legendre point; pre-compute part of p-hacking contribution
       @inbounds E[k] = M.lnWLegendre[k] - log1mexp(lnpH + m[] * logdiffcdf(𝒩, Z₀divσ[k]+z̄divσ, Z₀divσ[k]-z̄divσ))  # w/(1-p_H  ΔΦ(z ̅,-z ̅;z_0,σ^2 ) )
     end
   end
 
-	Threads.@threads for j ∈ 1:M.k
+	Threads.@threads for j ∈ 1:M.N
 		@inbounds begin
 			b = zdivσ[j]; absb = abs(b)
 			M.modelabsz && (neg2b = -2b)
@@ -358,9 +343,9 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
     end
     G += exp(Cᵢ) * Gᵢ
 
-		Threads.@threads for j ∈ 1:M.k  # for each z value/interpolation point
+		Threads.@threads for j ∈ 1:M.N  # for each z value/interpolation point
 			@inbounds begin
-				lnf_z₀ᵢⱼ = M.modelabsz ? logsumexp(lnf_z₀_i(M.kts[j]), lnf_z₀_i(-M.kts[j])) : lnf_z₀_i(M.kts[j])
+				lnf_z₀ᵢⱼ = M.modelabsz ? logsumexp(lnf_z₀_i(M.z[j]), lnf_z₀_i(-M.z[j])) : lnf_z₀_i(M.z[j])
 				if pH < eps()  # special case of pH=0
 					∫ⱼ = M.insig[j] ? lnf_z₀ᵢⱼ + tot_hacking[j] : lnf_z₀ᵢⱼ
 				else
@@ -385,10 +370,10 @@ end
 
 function HnFll(M::HnFmodel; pDFHR, kwargs...)
 	∫, G = _HnFll(M; pDFHR, kwargs...)
-	M.interpolate && (∫ = interpolate!(∫, BSpline(Cubic())).(M.zint))
-	ℒ = (iszero(length(M.wt)) ? ThreadsX.sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -pDFHR[2]*G) + M.penalty(; pDFHR, kwargs...)
+	(iszero(length(M.wt)) ? ThreadsX.sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -pDFHR[2]*G) + M.penalty(; pDFHR, kwargs...)
 end
 
+# HnFll(M;params...)
 
 # simulate hack'n'file data generating process with integer m
 # returns named tuple of true z's (ω), initial measurements (z✻), and reported results
@@ -398,6 +383,8 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 	ω = Vector{Float64}(undef,N)
 	z₀ = similar(ω)
 	z✻ = similar(ω)
+	c = zeros(Int,N)
+
 	Tμτν = GenT.(μ, τ, ν)
 	Threads.@threads for j ∈ eachindex(ω)
 		@inbounds begin
@@ -417,6 +404,7 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 			if abs(z₀ⱼ) > z̄  # if initial result significant, publish as is
 				z✻[i] = z₀ⱼ
 			else
+				cᵢ = 1
 				r = rand()
 				if r < pF  # file-drawer initial, insignificant result?
 					z✻[i] = NaN
@@ -436,8 +424,10 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 								break
 							end
 						end
+						cᵢ += 1
 					end
 				end
+				c[i] = cᵢ  # number of shots at non-significant termination
 			end
 			modelabsz && (z✻[i] = abs(z✻[i]))
 		end
@@ -445,9 +435,9 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 
 	if truncate
 		keep = @. !isnan(z✻) # && abs(z✻)<10
-		ω, z₀, z✻  = ω[keep], z₀[keep], z✻[keep]
+		ω, z₀, z✻, c  = ω[keep], z₀[keep], z✻[keep], c[keep]
 	end
-	(ω=ω, z₀=z₀, z✻=z✻)
+	(ω=ω, z₀=z₀, z✻=z✻, c=c)
 end
 
 @kwdef struct HnFresult<:RegressionModel
@@ -519,7 +509,7 @@ end
 
 # set up and fit model
 # any extra keyword arguments are passed to Optim.Options
-function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, interpres=0, NLegendre=50, NHermite=50, from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
+function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50, from::NamedTuple=NamedTuple(), xform::NamedTuple=NamedTuple(),
 									methods::Vector=[NewtonTrustRegion()], estname="", modelabsz::Bool=false, penalty::Function=(; kwargs...)->0., kwargs...)
 
 	println("\nModeling $estname data with $d mixture component(s)")
@@ -528,7 +518,7 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, interpres=0, NLegendre=50,
 	from  = merge((p=fill(1/d,d), μ=[0.]     , τ=collect(LinRange(1,d,d)), ν=fill(1.,d), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        ),  from)
   xform = merge((p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , ν=bcast(log), pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m)), xform)
 
-	M = HnFmodel(z, wt; d, modelabsz, interpres, NLegendre, NHermite, penalty)
+	M = HnFmodel(z, wt; d, modelabsz, NLegendre, NHermite, penalty)
 	
 	_from = pairs(from)
 	fromxform = [xform[p](v) for (p,v) ∈ _from]  # starting values in optimization parameter space
@@ -554,10 +544,10 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, interpres=0, NLegendre=50,
 		pD, pF, pH, pR = pDFHR
 
 		f(v) = ((ω,z₀)=v; pdf(𝒩,z₀ - ω) * p'pdf.(GenT.(μ,τ,ν), ω))  # f(z₀)
-		g(v) = ((_,z₀)=v; f(v) / (1 - pH * diffcdf(Normal(z₀,σ[]),z̄,-z̄)))  # f * "shots on goal"
-		I₀   = hcubature(f, [-100,-z̄], [100, z̄])[1] 
-		S₂₄  = hcubature(f, [-100,-4], [100,-2])[1] + hcubature(f, [-100,2], [100,4])[1]  # actually marginally significant
-		G    = hcubature(g, [-100,-z̄], [100, z̄])[1] 
+		g(v) = ((_,z₀)=v; f(v) / (1 - pH * diffcdf(Normal(z₀,σ[]),z̄,-z̄)^m[]))  # f * "shots on goal"
+		I₀   = hcubature(f, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
+		S₂₄  = hcubature(f, [-100,-4], [100,-2])[1] + hcubature(f, [-100,2], [100,4]; initdiv=10)[1]  # actually marginally significant
+		G    = hcubature(g, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
 		Sh₂₄ = pH * hcubature(v -> ((ω,z₀)=v; g(v) * (diffcdf(Normal(z₀,σ[]),4,-4)^m[] - diffcdf(Normal(z₀,σ[]),2,-2)^m[])), [-100,-z̄], [100,z̄])[1]  # p-hacked "marginally significant"
 
 		[
@@ -600,7 +590,6 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, interpres=0, NLegendre=50,
 										 "frac_insig_pubbed_as_is", "sig_p_hacked_frac", "insig_p_hacked_frac",
 										 "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig")
 
-	G = _HnFll(M; coefdict...)[2]
 	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), d, ll=-Optim.minimum(res))
 end
 
@@ -615,7 +604,7 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 
 	# empirical distribution of z's + model fit
 	Axis(f[1,1], xlabel="z", ylabel="Density", limits=(est.modelabsz ? 0 : -10, 10, nothing,nothing))
-	hist!(z, normalization=:pdf, bins=floor(Int,√size(z,1)), weights=length(wt)==0 ? Makie.automatic : wt, 
+	hist!(z, normalization=:pdf, bins=floor(Int,2√size(z,1)), weights=length(wt)==0 ? Makie.automatic : wt, 
 	        label="Actual published effects", color=(:slategray,.4))  # outline histogram of data
 
 	s,e = extrema(z); _zplot = s:.01:e
@@ -706,7 +695,7 @@ end
 
 
 #
-# confirm match between model and simulation
+# check model with simulation
 #
 
 p = [.7,.3]
@@ -755,26 +744,26 @@ f |> display
 
 	# van Zwet, Schwab, and Senn (2021) data, https://osf.io/xq4b2
 	df = DataFrame(CSV.File("data/van Zwet, Schwab, and Senn 2021/CochraneEffects.csv"))
-	@. @subset!(df, abs(:z)<10 && :"outcome.nr"==1 && :RCT=="yes" && :"outcome.group"=="efficacy")  # vZSS used 20 not 10
+	@. @subset!(df, abs(:z)<20 && :"outcome.nr"==1 && :RCT=="yes" && :"outcome.group"=="efficacy")  # vZSS uses 20
 	Random.seed!(29384)
 	df = combine(groupby(df, :"study.id.sha1"), :z => sample => :z)  # randomly choose among primary outcomes
-  results = [HnFfit(df.z; d, penalty, NLegendre=50, estname="vZZS$d") for d ∈ 1:3]
+  results = [HnFfit(df.z; d, penalty, estname="vZZS$d") for d ∈ 1:3]
 	vZSS = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, vZSS; title="van Zwet, Schwab, and Senn (2021) data")
 
 	# Schuemie et al. (2013), https://onlinelibrary.wiley.com/action/downloadSupplement?doi=10.1002%2Fsim.5925&file=Appendix+G+Revision.xlsx
 	df = DataFrame(XLSX.readtable("data/Schuemie et al. 2013/appendix g revision.xlsx", "NeatTable", first_row=2, infer_eltypes=true)...)
 	@. df.z = log(df."Effect estimate") / (log(df."Upper bound of 95% CI" / df."Lower bound of 95% CI") / 2z̄)
-	@. @subset!(df, abs(:z)<10)
+	@. @subset!(df, abs(:z)<20)
 	disallowmissing!(df, :z)
 	results = [HnFfit(df.z; d, penalty, estname="Setal$d") for d ∈ 1:3]
 	Setal = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, Setal; title="Schuemie et al. (2013) data")
 
-	# Star Wars, doi.org/10.1257/app.20150044, openicpsr.org/openicpsr/project/113633/version/V1/view?path=/openicpsr/113633/fcr:versions/V1/brodeur_le_sangnier_zylberberg_replication/Data/Final/final_stars_supp.dta&type=file
+	# Star Wars, DOI 10.1257/app.20150044, openicpsr.org/openicpsr/project/113633/version/V1/view?path=/openicpsr/113633/fcr:versions/V1/brodeur_le_sangnier_zylberberg_replication/Data/Final/final_stars_supp.dta&type=file
 	df = DataFrame(CSV.File("data/Brodeur et al. 2016/final_stars_supp.csv"))
 	df.z = df.coefficient_num ./ df.standard_deviation_num
-	@. @subset!(df, lowercase(:main)=="yes" && !ismissing(df.z) && abs(df.z)<20)
+	@. @subset!(df, lowercase(:main)=="yes" && !ismissing(:z) && abs(:z)<20)
 	disallowmissing!(df, :z)
 	results = [HnFfit(df.z, df.weight_table; d, penalty, estname="SW$d") for d ∈ 1:3]
 	SW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
@@ -782,8 +771,8 @@ f |> display
 
 	# Brodeur, Cook, and Heyes 2020, DOI 10.1257/aer.20190687, openicpsr.org/openicpsr/project/120246/version/V1/view?path=/openicpsr/120246/fcr:versions/V1/MM-Data.dta&type=file
 	df = DataFrame(CSV.File("data/Brodeur, Cook, and Heyes 2020/MM Data.csv"))
-	df.z = df.mu ./ df.sd  # .* (2*rand(Bernoulli(.5),size(df,1)).-1)
-	@. @subset!(df, !ismissing(:z) && !isnan(:z) && abs(:z)<10)
+	df.z = df.mu ./ df.sd
+	@. @subset!(df, !ismissing(:z) && !isnan(:z) && abs(:z)<20)
 	disallowmissing!(df, :z)
 	hist(df.z, bins=100) |> display
 	df.z .= abs.(df.z)
@@ -793,7 +782,7 @@ f |> display
 
 	# Arel-Bundock et al. 2026
 	df = DataFrame(CSV.File("data/Arel-Bundock et al. 2026/arel-bundock_briggs.csv"))
-	@. @subset!(df, !ismissing.(df.z_stat) .&& abs.(df.z_stat).<10)
+	@. @subset!(df, !ismissing.(:z_stat) && abs(:z_stat)<20)
 	results = [HnFfit(df.z_stat; d, penalty, estname="ABetal$d") for d ∈ 1:3]
 	ABetal = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	@time HnFplot(df.z_stat, ABetal; title="Arel-Bundock et al. (2026) data")
@@ -801,7 +790,7 @@ f |> display
 	# Vivalt 2020, DOI 10.1093/jeea/jvaa019, https://figshare.com/articles/dataset/Replication_files_for_How_Much_Can_We_Generalize_from_Impact_Evaluations_/12048600/1
 	df = DataFrame(CSV.File("data/Vivalt 2020/data_unstandardized.csv"))
 	df.z = df.treatmentcoefficient ./ df.treatmentstandarderror
-	@. @subset!(df, abs(:z)<10)
+	@. @subset!(df, abs(:z)<20)
 	results = [HnFfit(df.z; d, penalty, estname="V$d") for d ∈ 1:3]
 	V = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, V; title="Vivalt (2020) data")
@@ -811,19 +800,18 @@ f |> display
 				DataFrame(load("data/Gerber and Malhotra 2008/APSR_Data.xls", "All Studies"))[2:end,[:x4,:x6]] ]
 	@. @subset!(df, !ismissing(:x4))
 	df.z = Float64.(df.x6)
-	@. @subset!(df, abs.(:z)<10)
+	@. @subset!(df, abs(:z)<20)
 	results = [HnFfit(df.z; d, penalty, estname="GM$d") for d ∈ 1:3]
 	GM = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, GM; title="Gerber & Malhotra (2008) data")
 
-	# Barnet and Wren 2019 ~1M sample, DOI: 10.1136/bmjopen-2019-032506, https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData
+	# Barnett and Wren 2019 ~1M sample, DOI: 10.1136/bmjopen-2019-032506, https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData
 	df = DataFrame(RData.load("data/Georgescu and Wren 2018/Georgescu.Wren.RData")["complete"])
 	@. df.ci_level[ismissing(df.ci_level) || df.ci_level==.0095 || df.ci_level==.05] = .95
 	@. df.z = log(df.mean) / (ifelse(ismissing(df.lower) || iszero(df.lower), log(df.upper / df.mean), log(df.upper / df.lower) / 2) / cquantile(𝒩, (1 - df.ci_level)/2))
-	@. @subset!(df, !ismissing(:z) && !ismissing(:lower) && iszero(:mistake) && abs(:z)<10.)  # van Zwet & Cator Figure 1 stops at 10
+	@. @subset!(df, !ismissing(:z) && !ismissing(:lower) && iszero(:mistake) && !isnan(:z) && !isinf(:z) && abs(:z)<20)
 	# @. @subset!(df, :source!="Abstract")
-	results = [HnFfit(df.z;            d, penalty, interpres=1000          , estname="GW$d") for d ∈ 1:3]  # approximate fits by interpolating loglik over z
-	results = [HnFfit(df.z; results[d].d, penalty, from=results[d].coefdict, estname="GW$d") for d ∈ 1:3]
+	results = [HnFfit(df.z; d, penalty, estname="BW$d") for d ∈ 1:3]
 	BW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
 	HnFplot(df.z, BW; title="Barnett and Wren (2019) data")
 
