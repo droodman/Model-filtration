@@ -810,12 +810,16 @@ f |> display
 	@. df.ci_level[ismissing(df.ci_level) || df.ci_level==.0095 || df.ci_level==.05] = .95
 	@. df.z = log(df.mean) / (ifelse(ismissing(df.lower) || iszero(df.lower), log(df.upper / df.mean), log(df.upper / df.lower) / 2) / cquantile(𝒩, (1 - df.ci_level)/2))
 	@. @subset!(df, !ismissing(:z) && !ismissing(:lower) && iszero(:mistake) && !isnan(:z) && !isinf(:z) && abs(:z)<20)
-	# @. @subset!(df, :source!="Abstract")
 	results = [HnFfit(df.z; d, penalty, estname="BW$d") for d ∈ 1:3]
 	BW = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
 	HnFplot(df.z, BW; title="Barnett and Wren (2019) data")
 
-	table = regtable(BW, Setal, GM, SW, BCH, ABetal, vZSS, V;
+	@. @subset!(df, :source=="Abstract")
+	results = [HnFfit(df.z; d, penalty, estname="BWAbstr$d") for d ∈ 1:3]
+	BWAbstr = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
+	HnFplot(df.z, BWAbstr; title="Barnett and Wren (2019) data, Abstracts only")
+
+	table = regtable(BW, BWAbstr, Setal, GM, SW, BCH, ABetal, vZSS, V;
 							estim_decoration = (coef,p)->coef,  # no stars
 							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
