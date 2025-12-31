@@ -376,13 +376,13 @@ end
 # HnFll(M;params...)
 
 # simulate hack'n'file data generating process with integer m
-# returns named tuple of true z's (ω), initial measurements (z✻), and reported results
+# returns named tuple of true z's (ω), initial measurements (z), and reported results
 # NaN = file-drawered
 # if truncate=true (the default), restricts all return results to published studies
 function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector{Float64}, ν::Vector{Float64}, pDFHR::Vector{Float64}, σ::Vector{Float64}, m ::Vector{Float64}, modelabsz::Bool=false, truncate::Bool=true)
 	ω = Vector{Float64}(undef,N)
 	z₀ = similar(ω)
-	z✻ = similar(ω)
+	z = similar(ω)
 	c = zeros(Int,N)
 
 	Tμτν = GenT.(μ, τ, ν)
@@ -402,25 +402,25 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 		@inbounds begin
 			z₀ⱼ = z₀[i]
 			if abs(z₀ⱼ) > z̄  # if initial result significant, publish as is
-				z✻[i] = z₀ⱼ
+				z[i] = z₀ⱼ
 			else
 				cᵢ = 1
 				r = rand()
 				if r < pF  # file-drawer initial, insignificant result?
-					z✻[i] = NaN
+					z[i] = NaN
 				elseif r<pFDR  # publish initial, insigicant result
-					z✻[i] = z₀ⱼ
+					z[i] = z₀ⱼ
 				else  # p-hack
 					while true
 						batch = rand(Normal(z₀ⱼ, σ[]), Int(m[]))  # m measurements
 						zᵢ = batch[findfirst(x->abs(x)==maximum(abs.(batch)), batch)]  # most significant of batch
 						if abs(zᵢ) > z̄  # if significant, publish and stop
-							z✻[i] = zᵢ
+							z[i] = zᵢ
 							break
 						else
 							r = rand()
 							if r < pFDR  # after halting p-hacking search, file-drawer or publish latest, insignificant result, or revert to initial measurement
-								z✻[i] = r<pF ? NaN : r<pFD ? zᵢ : z₀ⱼ
+								z[i] = r<pF ? NaN : r<pFD ? zᵢ : z₀ⱼ
 								break
 							end
 						end
@@ -429,15 +429,15 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 				end
 				c[i] = cᵢ  # number of shots at non-significant termination
 			end
-			modelabsz && (z✻[i] = abs(z✻[i]))
+			modelabsz && (z[i] = abs(z[i]))
 		end
 	end
 
 	if truncate
-		keep = @. !isnan(z✻) # && abs(z✻)<10
-		ω, z₀, z✻, c  = ω[keep], z₀[keep], z✻[keep], c[keep]
+		keep = @. !isnan(z) # && abs(z)<10
+		ω, z₀, z, c  = ω[keep], z₀[keep], z[keep], c[keep]
 	end
-	(ω=ω, z₀=z₀, z✻=z✻, c=c)
+	(ω=ω, z₀=z₀, z=z, c=c)
 end
 
 @kwdef struct HnFresult<:RegressionModel
@@ -543,12 +543,25 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 	function derived_stats(; p,μ,τ,ν,pDFHR,σ,m)
 		pD, pF, pH, pR = pDFHR
 
-		f(v) = ((ω,z₀)=v; pdf(𝒩,z₀ - ω) * p'pdf.(GenT.(μ,τ,ν), ω))  # f(z₀)
-		g(v) = ((_,z₀)=v; f(v) / (1 - pH * diffcdf(Normal(z₀,σ[]),z̄,-z̄)^m[]))  # f * "shots on goal"
-		I₀   = hcubature(f, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
-		S₂₄  = hcubature(f, [-100,-4], [100,-2])[1] + hcubature(f, [-100,2], [100,4]; initdiv=10)[1]  # actually marginally significant
-		G    = hcubature(g, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
-		Sh₂₄ = pH * hcubature(v -> ((ω,z₀)=v; g(v) * (diffcdf(Normal(z₀,σ[]),4,-4)^m[] - diffcdf(Normal(z₀,σ[]),2,-2)^m[])), [-100,-z̄], [100,z̄])[1]  # p-hacked "marginally significant"
+		I_H(z₀, zlim=z̄) = diffcdf(Normal(z₀,σ[]), zlim, -zlim) ^ m[]
+		f_ωz₀(v) = ((ω,z₀)=v; pdf(𝒩,z₀ - ω) * p'pdf.(GenT.(μ,τ,ν), ω))  # f(z₀)
+		g_ωz₀(v) = ((_,z₀)=v; f_ωz₀(v) / (1 - pH * I_H(z₀)))  # f * "shots on goal"
+		I₀   = hcubature(f_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
+		S₂₄  = hcubature(f_ωz₀, [-100,-4], [100,-2])[1] + hcubature(f_ωz₀, [-100,2], [100,4]; initdiv=10)[1]  # actually marginally significant
+		G    = hcubature(g_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
+		Sh₂₄ = pH * hcubature(v -> ((ω,z₀)=v; g_ωz₀(v) * (I_H(z₀,4) - I_H(z₀,2))), [-100,-z̄], [100,z̄])[1]  # p-hacked "marginally significant"
+
+		f_z₀(z₀) = quadgk(ω -> f_ωz₀((ω,z₀)), -Inf, Inf)[1]
+		g_z₀(z₀) = f_z₀(z₀) / (1 - pH * I_H(z₀))
+		h(z) = f_z₀(z) + pH * quadgk(z₀ -> pdf(Normal(z₀,σ[]),z) * m[] * diffcdf(Normal(z₀,σ[]),abs(z),-abs(z)) ^ (m[]-1) * g_z₀(z₀), -z̄, z̄)[1]
+		@inline f_z(_::Symbol) = pF * G  # file-drawered mass
+		@inline f_z(z::Real) = abs(z)≤z̄ ? pD * h(z) + pR * g_z₀(z) : h(z)
+
+		KL = quadgk(z₀ -> (fz₀=f_z₀(z₀); fz₀ * (log(fz₀/f_z(z₀)) + log1p(-f_z(:F)))), -50, -z̄, z̄, 50)[1] / log(2)
+		H_z₀(τ_multiplier) = -hcubature(v -> ((ω,z₀)=v; xlogx(pdf(𝒩, z₀-ω) * p'pdf.(GenT.(μ,τ*τ_multiplier,ν), ω))), [-100,-100], [100, -z̄]; initdiv=10)[1] -
+						              hcubature(v -> ((ω,z₀)=v; xlogx(pdf(𝒩, z₀-ω) * p'pdf.(GenT.(μ,τ*τ_multiplier,ν), ω))), [-100,-z̄  ], [100,  z̄]; initdiv=10)[1] -
+						              hcubature(v -> ((ω,z₀)=v; xlogx(pdf(𝒩, z₀-ω) * p'pdf.(GenT.(μ,τ*τ_multiplier,ν), ω))), [-100, z̄  ], [100,100]; initdiv=10)[1]
+		KL_equiv_sample_multiplier = find_zero(τ_multiplier -> H_z₀(τ_multiplier) - (H_z₀(1) - KL), (0.01, 10))
 
 		[
 			pF*G / I₀                     # fraction of insignificant studies file-drawered
@@ -560,6 +573,9 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 			(I₀ - (1-pH)*G) / (1 - pF*G)  # fraction of significant results that are p-hacked
 			pD * (G - I₀) / (1 - pF*G)    # fraction of insignificant results that are p-hacked
 			Sh₂₄ / (Sh₂₄ + S₂₄)           # p-hacked fraction of "marginally significant" in Star Wars (2<|z|<4)
+
+			KL  # Kullback-Leibler divergence of z₀ from z
+			KL_equiv_sample_multiplier
 		]
 	end
 
@@ -588,11 +604,10 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 	one2D = first(Unicode.graphemes("₁₂₃₄"),d)
 	coefnames = vcat("p".*one2D, "μ", "τ".*one2D, "ν".*one2D, "pD", "pF", "pH", "pR", "σ", "m", "frac_insig_file_drawered", "overall_file_drawer_frac", 
 										 "frac_insig_pubbed_as_is", "sig_p_hacked_frac", "insig_p_hacked_frac",
-										 "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig")
+										 "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig", "KL", "KL_equiv_sample_multiplier")
 
 	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), d, ll=-Optim.minimum(res))
 end
-
 
 function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
 	t = est.coefdict
@@ -719,13 +734,13 @@ sim = HnFDGP(n; kwargs...)
 
 f = Figure()
 Axis(f[1,1], limits=(modelabsz ? 0 : -10, 10, nothing,nothing))
-hist!(sim.z✻[abs.(sim.z✻).<100], bins=10*2*100, normalization=:pdf)
+hist!(sim.z[abs.(sim.z).<100], bins=10*2*100, normalization=:pdf)
 zplot = (modelabsz ? 0 : -10):.01:10
 lines!(zplot, fZ(zplot; NHermite=50, kwargs...), color=:orange, label="True parameters")
 f|>display
 
 penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(m[])) + logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
-res = HnFfit(sim.z✻; d, modelabsz, penalty, estname="simulated", extended_trace=false)  # penalized maximum likelihood
+res = HnFfit(sim.z; d, modelabsz, penalty, estname="simulated", extended_trace=false)  # penalized maximum likelihood
 print(res.coefdict)
 lines!(zplot, fZ(zplot; modelabsz, res.coefdict...)[:,1], color=:green, label="Estimated parameters")
 
@@ -817,13 +832,13 @@ f |> display
 	@. @subset!(df, :source=="Abstract")
 	results = [HnFfit(df.z; d, penalty, estname="BWAbstr$d") for d ∈ 1:3]
 	BWAbstr = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
-	HnFplot(df.z, BWAbstr; title="Barnett and Wren (2019) data, Abstracts only")
+	HnFplot(df.z, BWAbstr; title="Barnett and Wren (2019) data, abstracts only")
 
 	table = regtable(BW, BWAbstr, Setal, GM, SW, BCH, ABetal, vZSS, V;
 							estim_decoration = (coef,p)->coef,  # no stars
 							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
-							keep = ["p₁", "p₂", "p₃", "p₄", "μ", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pH", "pD", "pR", "σ", "m", "frac_insig_file_drawered", "frac_insig_pubbed_as_is", "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig"],
+							keep = ["p₁", "p₂", "p₃", "p₄", "μ", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pH", "pD", "pR", "σ", "m", "frac_insig_file_drawered", "frac_insig_pubbed_as_is", "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig", "KL", "KL_equiv_sample_multiplier"],
 							estimformat = "%0.3g",
 							statisticformat = "%0.3g",
 							number_regressions = false,
