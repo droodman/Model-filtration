@@ -8,6 +8,8 @@ The program produces output like this ("true z" = signal-to-noise ratio = (unobs
 # Model
 <img width="775" height="773" alt="image" src="https://github.com/user-attachments/assets/30e24129-d3b1-42ad-8189-8e5da08a0f40" />
 
+For a 50-year-old antecedent, see [Greenwald (1975)](https://faculty.washington.edu/agg/pdf/Gwald_PsychBull_1975.OCR.pdf#page=7), p. 7.
+
 # Likelihood
 <img width="748" height="523" alt="image" src="https://github.com/user-attachments/assets/91348728-775b-4fbf-8a15-10b933b444bc" />
 
