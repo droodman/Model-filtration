@@ -6,7 +6,7 @@ Pkg.activate(".")  # activate this project's environment
 Pkg.instantiate()  # make sure all packages installed
 
 using Random, IrrationalConstants, Format, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature, Optim, LogExpFunctions, CSV, DataFrames, DataFramesMeta, ForwardDiff, LinearAlgebra, Roots, QuadGK, Statistics, 
-       InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions, ThreadsX, HCubature
+       InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions, ThreadsX, HCubature, Integrals
 
 const 𝒩 = Normal()
 const z̄ = quantile(𝒩, .975)  # 1.96
@@ -546,10 +546,10 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 		I_H(z₀, zlim=z̄) = diffcdf(Normal(z₀,σ[]), zlim, -zlim) ^ m[]
 		f_ωz₀(v) = ((ω,z₀)=v; pdf(𝒩,z₀ - ω) * p'pdf.(GenT.(μ,τ,ν), ω))  # f(z₀)
 		g_ωz₀(v) = ((_,z₀)=v; f_ωz₀(v) / (1 - pH * I_H(z₀)))  # f * "shots on goal"
-		I₀   = hcubature(f_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
-		S₂₄  = hcubature(f_ωz₀, [-100,-4], [100,-2])[1] + hcubature(f_ωz₀, [-100,2], [100,4]; initdiv=10)[1]  # actually marginally significant
-		G    = hcubature(g_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
-		Sh₂₄ = pH * hcubature(v -> ((ω,z₀)=v; g_ωz₀(v) * (I_H(z₀,4) - I_H(z₀,2))), [-100,-z̄], [100,z̄])[1]  # p-hacked "marginally significant"
+		I₀   = HCubature.hcubature(f_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
+		S₂₄  = HCubature.hcubature(f_ωz₀, [-100,-4], [100,-2])[1] + HCubature.hcubature(f_ωz₀, [-100,2], [100,4]; initdiv=10)[1]  # actually marginally significant
+		G    = HCubature.hcubature(g_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10)[1] 
+		Sh₂₄ = pH * HCubature.hcubature(v -> ((ω,z₀)=v; g_ωz₀(v) * (I_H(z₀,4) - I_H(z₀,2))), [-100,-z̄], [100,z̄])[1]  # p-hacked "marginally significant"
 
 		f_z₀(z₀) = quadgk(ω -> f_ωz₀((ω,z₀)), -Inf, Inf)[1]
 		g_z₀(z₀) = f_z₀(z₀) / (1 - pH * I_H(z₀))
@@ -557,11 +557,36 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 		@inline f_z(_::Symbol) = pF * G  # file-drawered mass
 		@inline f_z(z::Real) = abs(z)≤z̄ ? pD * h(z) + pR * g_z₀(z) : h(z)
 
-		KL = quadgk(z₀ -> (fz₀=f_z₀(z₀); fz₀ * (log(fz₀/f_z(z₀)) + log1p(-f_z(:F)))), -50, -z̄, z̄, 50)[1] / log(2)
-		H_z₀(τ_multiplier) = -hcubature(v -> ((ω,z₀)=v; xlogx(pdf(𝒩, z₀-ω) * p'pdf.(GenT.(μ,τ*τ_multiplier,ν), ω))), [-100,-100], [100, -z̄]; initdiv=10)[1] -
-						              hcubature(v -> ((ω,z₀)=v; xlogx(pdf(𝒩, z₀-ω) * p'pdf.(GenT.(μ,τ*τ_multiplier,ν), ω))), [-100,-z̄  ], [100,  z̄]; initdiv=10)[1] -
-						              hcubature(v -> ((ω,z₀)=v; xlogx(pdf(𝒩, z₀-ω) * p'pdf.(GenT.(μ,τ*τ_multiplier,ν), ω))), [-100, z̄  ], [100,100]; initdiv=10)[1]
-		KL_equiv_sample_multiplier = find_zero(τ_multiplier -> H_z₀(τ_multiplier) - (H_z₀(1) - KL), (0.01, 10))
+		infty = 50
+		H_z = - quadgk(z  -> xlogx(f_z(z  )), -infty, -z̄, z̄, infty)[1]; !iszero(pF) && (H_z += xlogx(f_z(:F)))  # check for pF=0 prevents NaN in gradient
+		H_z₀ = -quadgk(z₀ -> xlogx(f_z₀(z₀)), -infty, -z̄, z̄, infty)[1]
+
+		function conditional_entropy_integrand_file_drawer(v,_)  # |z₀|≤z̄: file drawer point mass (also a point mass at z=z₀, but no conditional entropy there)
+			_,z₀ = v
+			denom = 1 - pH * I_H(z₀)
+			t = xlogx(pD + pR / denom)
+			!iszero(pF) && (t += xlogx(pF / denom))  # check for pF=0 prevents NaN in gradient
+			t * f_ωz₀(v)
+		end
+		function conditional_entropy_integrand_p_hack(v,p)  # continuous distribution from p-hacking; p[] is probability a p-hacked result is published--pD (|z|≤z̄) or 1 (otherwise)
+				local _,z₀,z = v
+				iszero(pH) && return pH
+				t = log(pH * p[]) - log1p(- pH * I_H(z₀)) + logpdf(Normal(z₀,σ[]),z) + log(m[]) + logdiffcdf(Normal(z₀,σ[]),abs(z),-abs(z)) * (m[]-1)
+				t < eps() ? zero(t) : xexpx(t) * f_ωz₀(v)
+		end
+		# (cases where |z₀|>z̄ contribute no conditional entropy to H(z|z₀) because results published as-is)
+		H_z_z₀ = -solve(IntegralProblem(conditional_entropy_integrand_file_drawer, [-infty,-z̄       ], [infty,z̄      ]          ), HCubatureJL()).u -
+		          # integrate in z separately over (-∞,-z̄), (-z̄,z̄), (z̄,∞) becuse the integrand is discontinuous at ±z̄, and because P[publish] pD, not 1, if |z|≤z̄
+							solve(IntegralProblem(conditional_entropy_integrand_p_hack     , [-infty,-z̄,-infty], [infty,z̄,   -z̄],[one(pD)]), HCubatureJL()).u -
+							solve(IntegralProblem(conditional_entropy_integrand_p_hack     , [-infty,-z̄,     z̄], [infty,z̄,infty],[    pD ]), HCubatureJL()).u -
+							solve(IntegralProblem(conditional_entropy_integrand_p_hack     , [-infty,-z̄,    -z̄], [infty,z̄,    z̄],[one(pD)]), HCubatureJL()).u
+
+		H_z₀_z = H_z_z₀ + H_z₀ - H_z
+		println("H_z₀_z=$H_z₀_z H_z_z₀=$H_z_z₀ H_z₀=$H_z₀ H_z=$H_z")
+		H_z₀(τ_multiplier) = -HCubature.hcubature(v -> ((ω,z₀)=v; xlogx(pdf(𝒩, z₀-ω) * p'pdf.(GenT.(μ,τ*τ_multiplier,ν), ω))), [-100,-100], [100, -z̄]; initdiv=10)[1] -
+						              HCubature.hcubature(v -> ((ω,z₀)=v; xlogx(pdf(𝒩, z₀-ω) * p'pdf.(GenT.(μ,τ*τ_multiplier,ν), ω))), [-100,-z̄  ], [100,  z̄]; initdiv=10)[1] -
+						              HCubature.hcubature(v -> ((ω,z₀)=v; xlogx(pdf(𝒩, z₀-ω) * p'pdf.(GenT.(μ,τ*τ_multiplier,ν), ω))), [-100, z̄  ], [100,100]; initdiv=10)[1]
+		equiv_sample_reduction = 1 - find_zero(τ_multiplier -> H_z₀(τ_multiplier) - (H_z₀(1) - H_z₀_z), (0.01, 10))
 
 		[
 			pF*G / I₀                     # fraction of insignificant studies file-drawered
@@ -574,10 +599,12 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 			pD * (G - I₀) / (1 - pF*G)    # fraction of insignificant results that are p-hacked
 			Sh₂₄ / (Sh₂₄ + S₂₄)           # p-hacked fraction of "marginally significant" in Star Wars (2<|z|<4)
 
-			KL  # Kullback-Leibler divergence of z₀ from z
-			KL_equiv_sample_multiplier
+			H_z₀_z/log(2)  # Conditional entropy in z₀, in bits
+			equiv_sample_reduction
 		]
 	end
+	derived_stats(;vZSS.coefdict...)
+	# [ForwardDiff.derivative(σ->derived_stats(;p=est.coefdict.p,μ=est.coefdict.μ,τ=est.coefdict.τ,ν=est.coefdict.ν,pDFHR=est.coefdict.pDFHR,σ=[σ],m=est.coefdict.m), .5)[9] for est ∈ (Setal, GMpolisci, GMsoc, SW, BCH, ABetal, vZSS, V)]
 
 	Δ = ForwardDiff.jacobian(v->vcat(invxform(v)..., derived_stats(;coefdict_maker(v)...)), θ)  # Jacobian of full model parameters & derived stats wrt optimization parameters
 	H = ForwardDiff.hessian(objective, θ)  # Hessian of log likelihood wrt optimization parameters
@@ -604,9 +631,10 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 	one2D = first(Unicode.graphemes("₁₂₃₄"),d)
 	coefnames = vcat("p".*one2D, "μ", "τ".*one2D, "ν".*one2D, "pD", "pF", "pH", "pR", "σ", "m", "frac_insig_file_drawered", "overall_file_drawer_frac", 
 										 "frac_insig_pubbed_as_is", "sig_p_hacked_frac", "insig_p_hacked_frac",
-										 "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig", "KL", "KL_equiv_sample_multiplier")
-
-	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), d, ll=-Optim.minimum(res))
+										 "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig", "H(z₀|z)", "equiv_sample_reduction")
+	t = HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict..., derived_stats(;coefdict...)...), vcov, k=length(θ), n=size(z,1), d, ll=-Optim.minimum(res))
+	show(regtable(t))
+	t
 end
 
 function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
@@ -762,7 +790,7 @@ f |> display
 	@. @subset!(df, abs(:z)<20 && :"outcome.nr"==1 && :RCT=="yes" && :"outcome.group"=="efficacy")  # vZSS uses 20
 	Random.seed!(29384)
 	df = combine(groupby(df, :"study.id.sha1"), :z => sample => :z)  # randomly choose among primary outcomes
-  results = [HnFfit(df.z; d, penalty, estname="vZZS$d") for d ∈ 1:3]
+  results = [HnFfit(df.z; d, penalty, estname="vZSS$d") for d ∈ 1:3]
 	vZSS = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, vZSS; title="van Zwet, Schwab, and Senn (2021) data")
 
@@ -810,15 +838,24 @@ f |> display
 	V = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
 	HnFplot(df.z, V; title="Vivalt (2020) data")
 
-	# Gerber and Malhotra 2008, https://www.nowpublishers.com/article/details/supplementary-info/100.00008024_supp.rar
-	df = [DataFrame(load("data/Gerber and Malhotra 2008/AJPS_Data.xls", "All Studies"))[2:end,[:x4,:x6]] ;
-				DataFrame(load("data/Gerber and Malhotra 2008/APSR_Data.xls", "All Studies"))[2:end,[:x4,:x6]] ]
+	# Gerber and Malhotra 2008 poli sci, DOI 10.1177/1532673X09350979 https://www.nowpublishers.com/article/details/supplementary-info/100.00008024_supp.rar
+	df = [DataFrame(load("data/Gerber and Malhotra 2008a/AJPS_Data.xls", "All Studies"))[2:end,[:x4,:x6]] ;
+				DataFrame(load("data/Gerber and Malhotra 2008a/APSR_Data.xls", "All Studies"))[2:end,[:x4,:x6]] ]
 	@. @subset!(df, !ismissing(:x4))
 	df.z = Float64.(df.x6)
 	@. @subset!(df, abs(:z)<20)
-	results = [HnFfit(df.z; d, penalty, estname="GM$d") for d ∈ 1:3]
-	GM = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
-	HnFplot(df.z, GM; title="Gerber & Malhotra (2008) data")
+	results = [HnFfit(df.z; d, penalty, estname="GMpolisci$d") for d ∈ 1:3]
+	GMpolisci = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
+	HnFplot(df.z, GMpolisci; title="Gerber & Malhotra (2008a) data")
+
+	# Gerber and Malhotra 2008 sociology, DOI 10.1177/0049124108318973
+	df = [DataFrame(load("data/Gerber and Malhotra 2008b/ASR (9.26.06).xls", "ASR", ncols=7)) ;
+				DataFrame(load("data/Gerber and Malhotra 2008b/ASR (9.26.06).xls", "AJS", ncols=7))
+				DataFrame(load("data/Gerber and Malhotra 2008b/ASR (9.26.06).xls", "TSQ", ncols=7))]
+	@. @subset!(df, !ismissing(:Z) && abs(:Z)<20)
+	results = [HnFfit(df.Z; d, penalty, estname="GMsoc$d") for d ∈ 1:3]
+	GMsoc = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
+	HnFplot(df.Z, GMsoc; title="Gerber & Malhotra (2008b) data")
 
 	# Barnett and Wren 2019 ~1M sample, DOI: 10.1136/bmjopen-2019-032506, https://github.com/agbarnett/intervals/blob/master/data/Georgescu.Wren.RData
 	df = DataFrame(RData.load("data/Georgescu and Wren 2018/Georgescu.Wren.RData")["complete"])
@@ -834,11 +871,11 @@ f |> display
 	BWAbstr = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]  # BIC minimizer
 	HnFplot(df.z, BWAbstr; title="Barnett and Wren (2019) data, abstracts only")
 
-	table = regtable(BW, BWAbstr, Setal, GM, SW, BCH, ABetal, vZSS, V;
+	table = regtable(BW, BWAbstr, Setal, GMpolisci, GMsoc, SW, BCH, ABetal, vZSS, V;
 							estim_decoration = (coef,p)->coef,  # no stars
 							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
-							keep = ["p₁", "p₂", "p₃", "p₄", "μ", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pH", "pD", "pR", "σ", "m", "frac_insig_file_drawered", "frac_insig_pubbed_as_is", "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig", "KL", "KL_equiv_sample_multiplier"],
+							keep = ["p₁", "p₂", "p₃", "p₄", "μ", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pH", "pD", "pR", "σ", "m", "frac_insig_file_drawered", "frac_insig_pubbed_as_is", "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig","H(z₀|z)", "equiv_sample_reduction"],
 							estimformat = "%0.3g",
 							statisticformat = "%0.3g",
 							number_regressions = false,
