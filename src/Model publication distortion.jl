@@ -603,7 +603,7 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 			equiv_sample_reduction
 		]
 	end
-	derived_stats(;vZSS.coefdict...)
+	# derived_stats(;vZSS.coefdict...)
 	# [ForwardDiff.derivative(σ->derived_stats(;p=est.coefdict.p,μ=est.coefdict.μ,τ=est.coefdict.τ,ν=est.coefdict.ν,pDFHR=est.coefdict.pDFHR,σ=[σ],m=est.coefdict.m), .5)[9] for est ∈ (Setal, GMpolisci, GMsoc, SW, BCH, ABetal, vZSS, V)]
 
 	Δ = ForwardDiff.jacobian(v->vcat(invxform(v)..., derived_stats(;coefdict_maker(v)...)), θ)  # Jacobian of full model parameters & derived stats wrt optimization parameters
