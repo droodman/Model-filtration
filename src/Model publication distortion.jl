@@ -6,7 +6,7 @@ Pkg.activate(".")  # activate this project's environment
 Pkg.instantiate()  # make sure all packages installed
 
 using Random, IrrationalConstants, Format, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature, Optim, LogExpFunctions, CSV, DataFrames, DataFramesMeta, ForwardDiff, LinearAlgebra, Roots, QuadGK, Statistics, 
-       InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions, ThreadsX, HCubature, Integrals
+       InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions, ThreadsX, HCubature
 
 const 𝒩 = Normal()
 const z̄ = quantile(𝒩, .975)  # 1.96
@@ -137,8 +137,8 @@ function _fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFHR, σ, m)
 	end
 	∫ *= m[] / σ[] * pH  # density contribution from p-hacking
 
-	f_z = pdf(𝒩, z-ω)
-	modelabsz && (f_z += pdf(𝒩, z+ω))
+	f_z = fZ₀condΩ(z,ω)
+	modelabsz && (f_z += fZ₀condΩ(-z,ω))
 
 	∫ += f_z  # contribution from publishing original stat without p-hacking
 	if -z̄ ≤ z ≤ z̄
@@ -219,8 +219,8 @@ end
 
 # f(z), f(ω), f(ω|z), E[ω|z]
 # inconsistency: z should be a scalar for fΩcondZ but a vector or other iterable for EΩcondZ
-fΩ(ω; p, μ, τ, ν) = p'pdf.(GenT.(μ,τ,ν), ω)
-fZ₀condΩ(z₀,ω) = pdf(𝒩,z₀-ω)
+@inline fΩ(ω; p, μ, τ, ν) = p'pdf.(GenT.(μ,τ,ν), ω)
+@inline fZ₀condΩ(z₀,ω) = pdf(𝒩,z₀-ω)
 fΩcondZ(ω, z; p, μ, τ, ν, NHermite=50, NLegendre=50, kwargs...) = fZcondΩ(z, ω; NLegendre, kwargs..., truncate=false) * fΩ(ω; p, μ, τ, ν) / fZ([z]; p, μ, τ, ν, kwargs..., NLegendre, NHermite, truncate=false)[]
 EΩcondZ(z; rtol=.00001, maxevals=1e4, p, μ, τ, ν, NHermite=50, NLegendre=50, kwargs...) = [quadgk(ω -> ω * fZcondΩ(zᵢ, ω; kwargs..., NLegendre, truncate=false) * fΩ(ω; p, μ, τ, ν), -20, 20; rtol, maxevals)[1] for zᵢ∈z] ./ 
                                                                       fZ(z; p, μ, τ, ν, kwargs..., NLegendre, NHermite, truncate=false)
@@ -384,27 +384,22 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 	z₀ = similar(ω)
 	z = similar(ω)
 	c = zeros(Int,N)
-
 	Tμτν = GenT.(μ, τ, ν)
-	Threads.@threads for j ∈ eachindex(ω)
-		@inbounds begin
-			i = rand(Distributions.Categorical(p))
-			ω[j] = ωⱼ = rand(Tμτν[i])  # pick mixture component
-			z₀[j] = ωⱼ + rand(𝒩)  # initial measurement, variance 1 around ω
-		end
-	end
-
 	pD, pF, _, pR = pDFHR
 	pFD  = pF + pD
   pFDR = pF + pD + pR
+	_m = Int(m[])
 
 	Threads.@threads for i ∈ eachindex(z₀)  # for each simulated study
 		@inbounds begin
-			z₀ⱼ = z₀[i]
+			j = rand(Distributions.Categorical(p))  # pick mixture component
+			ω[i] = ωᵢ = rand(Tμτν[j])
+			z₀[i] = z₀ⱼ = ωᵢ + rand(𝒩)  # initial measurement, variance 1 around ω
+
 			if abs(z₀ⱼ) > z̄  # if initial result significant, publish as is
 				z[i] = z₀ⱼ
 			else
-				cᵢ = 1
+				cᵢ = 1  # number of shots at non-significant termination
 				r = rand()
 				if r < pF  # file-drawer initial, insignificant result?
 					z[i] = NaN
@@ -412,19 +407,19 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 					z[i] = z₀ⱼ
 				else  # p-hack
 					while true
-						batch = rand(Normal(z₀ⱼ, σ[]), Int(m[]))  # m measurements
+						batch = rand(Normal(z₀ⱼ, σ[]), _m)  # m measurements
 						zᵢ = batch[findfirst(x->abs(x)==maximum(abs.(batch)), batch)]  # most significant of batch
 						if abs(zᵢ) > z̄  # if significant, publish and stop
 							z[i] = zᵢ
 							break
 						else
+							cᵢ += 1
 							r = rand()
 							if r < pFDR  # after halting p-hacking search, file-drawer or publish latest, insignificant result, or revert to initial measurement
 								z[i] = r<pF ? NaN : r<pFD ? zᵢ : z₀ⱼ
 								break
 							end
 						end
-						cᵢ += 1
 					end
 				end
 				c[i] = cᵢ  # number of shots at non-significant termination
@@ -572,10 +567,10 @@ function add_derived_stats!(est::HnFresult)
 		pD, pF, pH, pR = pDFHR
 
 		I_H(z₀, zlim=z̄) = diffcdf(Normal(z₀,σ[]), zlim, -zlim) ^ m[]
-		f_ωz₀(v) = ((ω,z₀)=v; pdf(𝒩,z₀ - ω) * p'pdf.(GenT.(μ,τ,ν), ω))  # f(z₀)
+		f_ωz₀(v) = ((ω,z₀)=v; fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν))  # f(z₀)
 		g_ωz₀(v) = ((_,z₀)=v; f_ωz₀(v) / (1 - pH * I_H(z₀)))  # f * "shots on goal"
 		I₀   = hcubature(f_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1] 
-		S₂₄  = hcubature(f_ωz₀, [-100,-4], [100,-2])[1] + HCubature.hcubature(f_ωz₀, [-100,2], [100,4]; initdiv=10, rtol=1e-3, atol=1e-3)[1]  # actually marginally significant
+		S₂₄  = hcubature(f_ωz₀, [-100,-4], [100,-2]; initdiv=10)[1] + hcubature(f_ωz₀, [-100,2], [100,4]; initdiv=10, rtol=1e-3, atol=1e-3)[1]  # actually marginally significant
 		G    = hcubature(g_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1] 
 		Sh₂₄ = pH * hcubature(v -> ((ω,z₀)=v; g_ωz₀(v) * (I_H(z₀,4) - I_H(z₀,2))), [-100,-z̄], [100,z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]  # p-hacked "marginally significant"
 
@@ -594,23 +589,23 @@ function add_derived_stats!(est::HnFresult)
 		equiv_sample_reduction = 1 - find_zero(τ_multiplier -> H_z₀(τ_multiplier) - (H_z₀(1) - entropy_gain), (0.01, 1.5); rtol=1e-3, atol=1e-3)
 
 		[
-			pF*G / I₀                     # fraction of insignificant studies file-drawered
-			pF*G                          # fraction of all studies file-drawered
-			pR*G / I₀ + pD                # fraction of insignificant published as is
-			1 - (1-pH)*G/I₀               # fraction of initially insignificant that lead to published, significant, p-hacked results
-			pD * (G/I₀ - 1)               # fraction of initially insignificant that lead to published, insignificant, p-hacked results
+			pF*G / I₀                         # fraction of insignificant studies file-drawered
+			pF*G                              # fraction of all studies file-drawered
+			pR*G / I₀ + pD                    # fraction of insignificant published as is
+			1 - (1-pH)*G/I₀                   # fraction of initially insignificant that lead to published, significant, p-hacked results
+			pD * (G/I₀ - 1)                   # fraction of initially insignificant that lead to published, insignificant, p-hacked results
 
-			(I₀ - (1-pH)*G) / (1 - pF*G)  # fraction of significant results that are p-hacked
-			pD * (G - I₀) / (1 - pF*G)    # fraction of insignificant results that are p-hacked
-			Sh₂₄ / (Sh₂₄ + S₂₄)           # p-hacked fraction of "marginally significant" in Star Wars (2<|z|<4)
+			pD * (G - I₀) / ((pD+pR) * G)     # fraction of insignificant results that are p-hacked
+			(I₀ - (1-pH)*G) / (1 - (1-pH)*G)  # fraction of significant results that are p-hacked
+			Sh₂₄ / (Sh₂₄ + S₂₄)               # p-hacked fraction of "marginally significant" in Star Wars (2<|z|<4)
 
-			entropy_gain/log(2)  # H(Ω|Z) - H(Ω|Z₀), in bits
+			entropy_gain/log(2)               # H(Ω|Z) - H(Ω|Z₀), in bits
 			equiv_sample_reduction
 		]
 	end
-
 	# [ForwardDiff.derivative(σ->derived_stats(;p=est.coefdict.p,μ=est.coefdict.μ,τ=est.coefdict.τ,ν=est.coefdict.ν,pDFHR=est.coefdict.pDFHR,σ=[σ],m=est.coefdict.m), .5)[9] for est ∈ (Setal, GMpolisci, GMsoc, SW, BCH, ABetal, vZSS, V)]
 
+	d = length(est.coefdict.p)
 	est.coef = est.coef[1:3d+7]  # remove old derived stats if any; for debugging, allows this function to be called repeatedly
 	est.vcov = est.vcov[1:3d+7, 1:3d+7]
 	est.coefnames = est.coefnames[1:3d+7]
@@ -626,6 +621,12 @@ function add_derived_stats!(est::HnFresult)
 										 "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig", "H(Ω|Z)-H(Ω|Z₀)", "equiv_sample_reduction")
 	show(regtable(est))
 	est
+end
+
+function HnFestimate(z::Vector, wt::Vector=Float64[]; estname="", kwargs...)
+	results = [HnFfit(z; d, estname="$estname$d", kwargs...) for d ∈ 1:3]
+	est = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
+	add_derived_stats!(est)
 end
 
 function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
@@ -725,12 +726,6 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 	lines!(ωplot, @. FZcondΩ(ωplot+z̄, ωplot; kwargsz..., NLegendre)-FZcondΩ(ωplot-z̄, ωplot; kwargsz..., NLegendre))
 	fAK |> display
 	save("output/$(est.estname) A&K Fig1.png", fAK)
-end
-
-function HnFestimate(z::Vector, wt::Vector=Float64[]; estname="", kwargs...)
-	results = [HnFfit(z; d, estname="$estname$d", kwargs...) for d ∈ 1:3]
-	est = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
-	add_derived_stats!(est)
 end
 
 
