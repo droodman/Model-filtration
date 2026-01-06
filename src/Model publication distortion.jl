@@ -269,7 +269,7 @@ import Base.==
 # Hack'n'file log likelihood
 #
 
-# Compute observation-level likelihood (not log likelihood) and file-drawer mass
+# Compute observation-level likelihood (not log likelihood), file-drawer mass, and expected fraction of initially insignificant results
 function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::AbstractVector{T}, ν::AbstractVector{T}, pDFHR::AbstractVector, σ::Vector, m::Vector) where {T}
   pD, pF, pH, pR = pDFHR
 	lnpD, lnpH = log(pD), log(pH)
@@ -283,7 +283,7 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 
 	# pre-allocating these hampers automatic differentiation because they depend on T, which could be a Dual number
 	∫ = _d<M.d[] ? Matrix{T}(undef,M.N,_d) : get!(M.∫dict, T, Matrix{T}(undef,M.N,_d))::Matrix{T}  # likelihood contributions for each z knot and each mixture component
-	G = zero(T)	 # accumulator for expected number of publish/file-drawer/p-hack decision junctures
+	I₀ = G = zero(T)	 # accumulators for expected number of initially insig results, and number of publish/file-drawer/p-hack decision junctures
 	B = get!(M.Bdict, T, Vector{T}(undef, M.NLegendre))::Vector{T}
 	F = get!(M.Fdict, T, Matrix{T}(undef, M.NLegendre, M.N))::Matrix{T}  # ϕ(z;z_0,σ^2 ) 〖ΔΦ(|z|,-|z|;z_0,σ^2 )〗^(m-1) for each z and each z₀ (Legendre integration point)
   tot_hacking = get!(M.tot_hacking_dict, T, Vector{T}(undef,M.N))::Vector{T}
@@ -319,7 +319,7 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 		end
 	end
 
-	@inbounds for _i ∈ 1:_d
+	@inbounds for _i ∈ 1:_d  # iterate over non~zero mixture components
 		i = is[_i]
 
 		# f(z_0) for ith mixture component, integrating out ω with Gauss-Hermite quadrature
@@ -335,13 +335,16 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 											end
 											for (x,lnwpx²) ∈ zip(M.Ω, M.lnWpΩ²))
 
-    Gᵢ = zero(T)
+    I₀ᵢ = Gᵢ = zero(T)
     for k ∈ eachindex(E)	# for each z₀ (Legendre integration point)
-      t = E[k] + lnf_z₀_i(M.Z₀[k])
-      Gᵢ += exp(t)
-		  B[k] = lnpHσm + t
+      lnf_z₀ᵢₖ = lnf_z₀_i(M.Z₀[k])
+			lnGᵢₖ = E[k] + lnf_z₀ᵢₖ
+		  B[k] = lnpHσm + lnGᵢₖ
+			I₀ᵢ += exp(M.lnWLegendre[k] + lnf_z₀ᵢₖ)
+      Gᵢ += exp(lnGᵢₖ)
     end
     G += exp(Cᵢ) * Gᵢ
+		I₀ += exp(Cᵢ) * I₀ᵢ
 
 		Threads.@threads for j ∈ 1:M.N  # for each z value/interpolation point
 			@inbounds begin
@@ -365,12 +368,13 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 			end
 		end
 	end
-  logsumexp!(tot_hacking, ∫), pF*G  # sum across mixture components, into `tot_hacking` because it's the right size and already allocated
+  logsumexp!(tot_hacking, ∫), pF*G, I₀  # sum across mixture components, into `tot_hacking` because it's the right size and already allocated
 end
 
+# returns negative of penalized log likelihood
 function HnFll(M::HnFmodel; pDFHR, kwargs...)
-	∫, G = _HnFll(M; pDFHR, kwargs...)
-	(iszero(length(M.wt)) ? ThreadsX.sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -G) + M.penalty(; pDFHR, kwargs...)
+	∫, G, I₀ = _HnFll(M; pDFHR, kwargs...)
+	(iszero(length(M.wt)) ? ThreadsX.sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -G) + M.penalty(; pDFHR, file_drawer_insig = G/I₀, kwargs...)
 end
 
 # HnFll(M;params...)
@@ -775,7 +779,11 @@ f |> display
 
 @time begin
 	# penalty function for parameters that can generate singularities
-  penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(m[])) + logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
+  penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, file_drawer_insig::T, kwargs...) where {T} = 
+		logpdf(Exponential(log(10)), m[]-1) + 
+		logpdf(Normal(0,5), log(σ[])) + 
+		sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) +
+		logpdf(Beta(2,1),file_drawer_insig)
 
 	# van Zwet, Schwab, and Senn (2021) data, https://osf.io/xq4b2
 	df = DataFrame(CSV.File("data/van Zwet, Schwab, and Senn 2021/CochraneEffects.csv"))
