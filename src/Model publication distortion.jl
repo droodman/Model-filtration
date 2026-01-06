@@ -806,7 +806,7 @@ f |> display
 	df.z = df.coefficient_num ./ df.standard_deviation_num
 	@. @subset!(df, lowercase(:main)=="yes" && !ismissing(:z) && abs(:z)<20)
 	disallowmissing!(df, :z)
-  SW = HnFestimate(df.z; penalty, estname="SW")
+  SW = HnFestimate(df.z, df.weight_table; penalty, estname="SW")
 	HnFplot(df.z, SW, df.weight_table; title="Brodeur et al. (2016) data")
 
 	# Brodeur, Cook, and Heyes 2020, DOI 10.1257/aer.20190687, openicpsr.org/openicpsr/project/120246/version/V1/view?path=/openicpsr/120246/fcr:versions/V1/MM-Data.dta&type=file
@@ -823,7 +823,7 @@ f |> display
 	df = DataFrame(CSV.File("data/Arel-Bundock et al. 2026/arel-bundock_briggs.csv"))
 	@. @subset!(df, !ismissing.(:z_stat) && abs(:z_stat)<20)
   ABetal = HnFestimate(df.z_stat; penalty, estname="ABetal")
-	@time HnFplot(df.z_stat, ABetal; title="Arel-Bundock et al. (2026) data")
+	HnFplot(df.z_stat, ABetal; title="Arel-Bundock et al. (2026) data")
 
 	# Vivalt 2020, DOI 10.1093/jeea/jvaa019, https://figshare.com/articles/dataset/Replication_files_for_How_Much_Can_We_Generalize_from_Impact_Evaluations_/12048600/1
 	df = DataFrame(CSV.File("data/Vivalt 2020/data_unstandardized.csv"))
