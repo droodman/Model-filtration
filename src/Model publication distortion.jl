@@ -377,56 +377,43 @@ function HnFll(M::HnFmodel; pDFHR, kwargs...)
 	(iszero(length(M.wt)) ? ThreadsX.sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -G) + M.penalty(; pDFHR, file_drawer_insig = G/I₀, kwargs...)
 end
 
-# HnFll(M;params...)
 
 # simulate hack'n'file data generating process with integer m
 # returns named tuple of true z's (ω), initial measurements (z), and reported results
 # NaN = file-drawered
 # if truncate=true (the default), restricts all return results to published studies
-function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector{Float64}, ν::Vector{Float64}, pDFHR::Vector{Float64}, σ::Vector{Float64}, m ::Vector{Float64}, modelabsz::Bool=false, truncate::Bool=true)
+function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector{Float64}, ν::Vector{Float64}, pDFR::Vector{Float64}, σ::Vector{Float64}, μₘ::Vector{Float64}, σₘ::Vector{Float64}, modelabsz::Bool=false, truncate::Bool=true)
 	ω = Vector{Float64}(undef,N)
 	z₀ = similar(ω)
+	z₁ = fill(NaN,N)
+	m = zeros(Int,N)
 	z = similar(ω)
-	c = zeros(Int,N)
 	Tμτν = GenT.(μ, τ, ν)
-	pD, pF, _, pR = pDFHR
-	pFD  = pF + pD
-  pFDR = pF + pD + pR
-	_m = Int(m[])
 
 	Threads.@threads for i ∈ eachindex(z₀)  # for each simulated study
 		@inbounds begin
 			j = rand(Distributions.Categorical(p))  # pick mixture component
 			ω[i] = ωᵢ = rand(Tμτν[j])
-			z₀[i] = z₀ⱼ = ωᵢ + rand(𝒩)  # initial measurement, variance 1 around ω
+			z₀[i] = z₀ᵢ = ωᵢ + rand(𝒩)  # initial measurement, variance 1 around ω
 
-			if abs(z₀ⱼ) > z̄  # if initial result significant, publish as is
-				z[i] = z₀ⱼ
+			if abs(z₀ᵢ) > z̄  # if initial result significant, publish as is
+				z[i] = z₀ᵢ
 			else
-				cᵢ = 1  # number of shots at non-significant termination
-				r = rand()
-				if r < pF  # file-drawer initial, insignificant result?
-					z[i] = NaN
-				elseif r<pFDR  # publish initial, insigicant result
-					z[i] = z₀ⱼ
-				else  # p-hack
-					while true
-						batch = rand(Normal(z₀ⱼ, σ[]), _m)  # m measurements
-						zᵢ = batch[findfirst(x->abs(x)==maximum(abs.(batch)), batch)]  # most significant of batch
-						if abs(zᵢ) > z̄  # if significant, publish and stop
-							z[i] = zᵢ
-							break
-						else
-							cᵢ += 1
-							r = rand()
-							if r < pFDR  # after halting p-hacking search, file-drawer or publish latest, insignificant result, or revert to initial measurement
-								z[i] = r<pF ? NaN : r<pFD ? zᵢ : z₀ⱼ
-								break
-							end
-						end
+				m[i] = mᵢ = floor(Int, rand(Normal(μₘ[], σₘ[])))  # number of measurements to be taken if p-hacking
+				if mᵢ<1	 # no p-hacking
+					z₁[i] = z₁ᵢ = z₀ᵢ
+				else
+					batch = rand(Normal(z₀ᵢ, σ[]), mᵢ)  # m measurements
+					absbatch = abs.(batch)
+					j = findfirst(==(maximum(absbatch)), absbatch)  # most significant of batch
+					z₁[i] = z₁ᵢ = batch[j]
+					if z₁ᵢ < -z̄ || z̄ < z₁ᵢ  # if significant, publish and stop
+						z[i] = z₁ᵢ
+						continue
 					end
 				end
-				c[i] = cᵢ  # number of shots at non-significant termination
+				r = rand(Distributions.Categorical(pDFR))
+				z[i] = r==1 ? z₁ᵢ : r==2 ? NaN : z₀ᵢ  # publish final, significant result; file-drawer; publish initial, insignificant result
 			end
 			modelabsz && (z[i] = abs(z[i]))
 		end
@@ -434,11 +421,130 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 
 	if truncate
 		keep = @. !isnan(z) # && abs(z)<10
-		ω, z₀, z, c  = ω[keep], z₀[keep], z[keep], c[keep]
+		ω, z₀, m, z₁, z  = ω[keep], z₀[keep], m[keep], z₁[keep], z[keep]
 	end
-	(ω=ω, z₀=z₀, z=z, c=c)
+	(ω=ω, z₀=z₀, m=m, z₁=z₁, z=z)
 end
 
+
+p = [.7,.3]
+μ = [0.7]
+τ = [1.2,2.7]
+ν = [10., 20.]
+pD = .4
+pF = .4
+pR = .2
+σ = [.2]
+μₘ = [5.]
+σₘ = [5.]
+d = length(p)
+modelabsz = false
+pDFR = [pD, pF, pR]
+kwargs = (p=p, μ=μ, τ=τ, ν=ν, pDFR=pDFR, σ=σ, μₘ=μₘ, σₘ=σₘ, modelabsz=modelabsz)
+
+sim = HnFDGP(10_000_000; kwargs..., truncate=false)
+
+hr(d,x) = exp(logpdf(d,x) - logcdf(d,x))  # hazard rate
+
+  I_H(z₀, zlim=z̄) =    diffcdf(Normal(z₀,σ[]), abs(zlim), -abs(zlim))  # indicator for initial insignificance
+lnI_H(z₀, zlim=z̄) = logdiffcdf(Normal(z₀,σ[]), abs(zlim), -abs(zlim))
+
+f_phacked_insig_z(z₀) = (lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; exp(logpdf(𝒩σ,μₘ[]) - logpdf(𝒩σ,μ̃ₘ) + logcdf(𝒩σ,μ̃ₘ-1)))
+
+f_Z₀(z₀) = quadgk(ω->fZ₀condΩ(z₀,ω) * fΩ(ω; p, μ, τ, ν), -Inf, Inf)[1]  # non-p-hacked insig results, including file-drawered
+
+# marginal density of (p-hacked) z₁, regardless of whether used
+f_Z₁(z₁) = hcubature(v->begin
+												  (ω,z₀)=v
+													-eps() < z₁ < eps() && return 0.
+												  lnx = lnI_H(z₀,z₁)
+													μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
+													exp(logpdf(Normal(z₀,σ[]), z₁) + (μₘ[]-1 + σₘ[]^2 * .5lnx) * lnx + logcdf(𝒩σ,μ̃ₘ-1)) * (hr(𝒩σ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ) *
+															fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)
+                        end, [-100., -z̄], [100., z̄]; initdiv=10)[1]  # non-p-hacked insig results, including file-drawered
+
+HnFden(z) = (-z̄≤z≤z̄ ? ((pR+pD) * cdf(𝒩σ,.5-μₘ[]) + pR * f_phacked_insig_z(z₀)) * f_Z₀(z) + pD * f_Z₁(z) : 
+                                                                                  f_Z₀(z) +      f_Z₁(z)  ) / (1 - pF * f_insig)
+
+zplot = -10:.01:10
+f = Figure()
+Axis(f[1,1], limits=(-10, 10, nothing, nothing))
+hist!(sim.z[.!isnan.(sim.z)], bins=1000, normalization=:pdf)
+HnF = HnFden.(zplot)
+lines!(zplot, HnF, color=:red)
+f |> display
+
+
+# Pr[validly significant]
+1 - hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1], 
+   mean(@. abs(sim.z₀)>z̄)
+
+𝒩σ = Normal(0,σₘ[])
+
+# Pr[p-hacked to significance]
+hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; (cdf(𝒩σ,μₘ[]-.5) - exp(logpdf(𝒩σ,μₘ[]) - logpdf(𝒩σ,μ̃ₘ) + logcdf(𝒩σ,μ̃ₘ-.5))) * fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1], 
+   mean(@. abs(sim.z₀)<z̄ && abs(sim.z)>z̄)
+
+# Pr[initially insig & no p-hacking]
+hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; ccdf(𝒩σ,μₘ[]-.5) * fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1], 
+   mean(@. abs(sim.z₁)<z̄ && sim.z₀==sim.z₁),
+   mean(@. (abs(sim.z)≤z̄ || isnan(sim.z)) && sim.z₀==sim.z₁)
+
+# Pr[insig or file-drawered despite p-hacking]
+hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; exp(logpdf(𝒩σ,μₘ[]) - logpdf(𝒩σ,μ̃ₘ) + logcdf(𝒩σ,μ̃ₘ-.5)) * fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1], 
+   mean(@. abs(sim.z₀)<z̄ && abs(sim.z₁)<z̄ && sim.z₀!=sim.z₁),
+   mean(@. abs(sim.z₀)≤z̄ && sim.z₀!=sim.z₁ && (abs(sim.z)≤z̄ || isnan(sim.z)))
+
+# Pr[insig and published or file-drawered] (sum of previous two)
+f_insig = hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; (ccdf(𝒩σ,μₘ[]-.5) + exp(logpdf(𝒩σ,μₘ[]) - logpdf(𝒩σ,μ̃ₘ) + logcdf(𝒩σ,μ̃ₘ-.5))) * fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1]; 
+   f_insig,
+	 mean(@. abs(sim.z₁)<z̄),
+   mean(@. (abs(sim.z)≤z̄ || isnan(sim.z)))
+
+
+# Pr[file-drawered]
+pF * f_insig, 
+   mean(@. isnan(sim.z))
+
+# no p-hacking or file-drawering
+nodistortion = @. (sim.z==sim.z₁==sim.z₀) * sim.z₁ .|> x-> isnan(x) ? 0. : x
+f = Figure()
+Axis(f[1,1], limits=(-1.96, 1.96, 0, .1))
+hist!(nodistortion, bins=1000, normalization=:pdf)
+zplot = -1.96:.01:1.96
+f_Zplot = (pR+pD) * cdf(𝒩σ,.5-μₘ[]) * f_Z₀.(zplot)
+lines!(zplot, f_Zplot)
+f |> display
+
+zplot=-.1:.001:.1;lines(zplot,f_Z₁.(zplot))
+
+# p-hacking tried and rejected, so initial measurement is reported
+reverted = @. (sim.z==sim.z₀≠sim.z₁) * sim.z .|> x-> isnan(x) ? 0. : x
+f = Figure()
+Axis(f[1,1], limits=(-1.96, 1.96, 0, .1))
+hist!(reverted, bins=1000, normalization=:pdf)
+zplot = -1.96:.01:1.96
+f_Zplot =  pR * f_phacked_insig_z.(zplot) .* f_Z₀.(zplot)
+lines!(zplot, f_Zplot)
+f |> display
+
+phackedsig = @. (sim.z==sim.z₀ && abs(sim.z)>z̄) * sim.z
+
+validsig = @. (abs(sim.z₀)>z̄) * sim.z
+sig = @. (!isnan(sim.z)) * sim.z
+hist!(phackedsig, bins=1000, normalization=:pdf)
+hist!(validsig, bins=1000, normalization=:pdf)
+hist!(sig, bins=1000, normalization=:pdf)
+lines!(zplot, f_Z₁plot)
+f |> display
+
+f_Z₀plot = f_Z₀.(zplot)
+
+f_Zplot = (f_Z₁.(zplot) + f_Z₀.(zplot)) 
+lines!(zplot, f_Z₀plot)
+lines!(zplot, f_Zplot)
+
+x = 1e-60; exp(logpdf(Normal(), μₘ[]/σₘ[]) - logcdf(Normal(), (μₘ[]-1)/σₘ[]) + logcdf(Normal(), (μₘ[]-1)/σₘ[] + σₘ[] * log(x)) - logpdf(Normal(), μₘ[]/σₘ[] + σₘ[] * log(x))) * σₘ[]/x * (hr((μₘ[]-1)/σₘ[] + σₘ[] * log(x)) + μₘ[]/σₘ[] + σₘ[] * log(x))
 @kwdef mutable struct HnFresult<:RegressionModel
 	estname::String
 	modelabsz::Bool
@@ -742,15 +848,15 @@ p = [.7,.3]
 τ = [1.2,2.7]
 ν = [20., 20.]
 pD = .4
-pF = .3
-pH = .2
-pR = .1
+pF = .4
+pR = .2
 σ = [.2]
-m = [5.]
+μₘ = [15.]
+σₘ = [10.]
 d = length(p)
 modelabsz = false
-pDFHR = [pD, pF, pH, pR]
-kwargs = (p=p, μ=μ, τ=τ, ν=ν, pDFHR=pDFHR, σ=σ, m=m, modelabsz=modelabsz)
+pDFR = [pD, pF, pR]
+kwargs = (p=p, μ=μ, τ=τ, ν=ν, pDFR=pDFR, σ=σ, μₘ=μₘ, σₘ=σₘ, modelabsz=modelabsz)
 
 n = 100_000
 Random.seed!(1232)
