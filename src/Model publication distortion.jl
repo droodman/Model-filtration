@@ -76,7 +76,7 @@ get1000(::Vector{T}) where {T} = T[]
 put1000(::Vector{T}) where {T} = T[1,0,0,0]  # constant 1,0,0,0
 InverseFunctions.inverse(::typeof(get1000)) = put1000
 
-# # transform to constrain pDFHR to have pR=0
+# # transform to constrain pDFR to have pR=0
 # get_pR0(v::Vector{T}) where {T} = v[1:3]
 # put_pR0(v::Vector{T}) where {T} = T[v; 0]
 # InverseFunctions.inverse(::typeof(get_pR0)) = put_pR0
@@ -113,52 +113,8 @@ bcast = Broadcast.BroadcastFunction  # short-hand for forming the broadcasting v
 
 
 # compute f(z|ω) & F(file drawer|ω)
-function _fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFHR, σ, m)
-	pD, pF, pH, pR = pDFHR
-  lnpH = log(pH)
-
-	Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
-	Z₀ .*= z̄  # change of variables to quadrature over [-z̄, z̄]
-  lnWLegendre = log.(W) .+ log(z̄)
-
-	zdivσ, z̄divσ = z/σ[], z̄/σ[]
-
-  G = ∫ = 0.
-	b = zdivσ; absb = abs(b)
-	@inbounds for k ∈ 1:NLegendre  # p-hacking; integrate out z₀ over [-z̄, z̄]
-		a = Z₀[k] / σ[]
-    B = lnWLegendre[k] + logpdf(𝒩, Z₀[k]-ω) - log1mexp(lnpH + logdiffcdf(𝒩, a+z̄divσ, a-z̄divσ) * m[])
-    G += exp(B) 
-
-		if a+absb ≉ a-absb
-      F = logpdf(𝒩, b-a) + logdiffcdf(𝒩, a+absb, a-absb) * (m[]-1)
-			modelabsz && (F += log1pexp(-2b * a))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
-			∫ += exp(B + F)
-		end
-	end
-	∫ *= m[] / σ[] * pH  # density contribution from p-hacking
-
-	f_z = fZ₀condΩ(z,ω)
-	modelabsz && (f_z += fZ₀condΩ(-z,ω))
-
-	∫ += f_z  # contribution from publishing original stat without p-hacking
-	if -z̄ ≤ z ≤ z̄
-		∫ *= pD  # in insignificant range, same formulas, but times pD
-    ∫ += pR * f_z / (1 - exp(lnpH + logdiffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ) * m[]))  # contribution from reverting to original stat after p-hacking
-	end
-	∫, pF*G
-end
-
-
- # f(z|ω). If truncate=true (the default), returns the density conditional on publication
-fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFHR, σ, m, truncate=true) = _fZcondΩ(z, ω; modelabsz, NLegendre, pDFHR, σ, m) |> (y -> truncate ? y[1]/(1 - y[2]) : y[1])
- 
-# the most time-consuming plotting is of the confidence intervals: for various values of ω, 
-# the cdf F(z|ω) is numerically calculated, many times--iteratively seeking where it hits, e.g., .025 and .975
-# to save time, pre-compute all components of f(z|ω) that do not depend on z, notably logdiffcdf(𝒩(0,σ), Z₀[k]+z̄, Z₀[k]-z̄)
-function FZcondΩ(z, ω; modelabsz::Bool=false, NLegendre=50, pDFHR, σ, m, rtol=.00001, order=13)
-	pD, pF, pH, pR = pDFHR
-  lnpH = log(pH)
+function _fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ)
+	pD, pF, pR = pDFR
 
 	Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
 	Z₀ .*= z̄  # change of variables to quadrature over [-z̄, z̄]
@@ -166,52 +122,121 @@ function FZcondΩ(z, ω; modelabsz::Bool=false, NLegendre=50, pDFHR, σ, m, rtol
 	
 	z̄divσ, Z₀divσ = z̄/σ[], Z₀/σ[]
 
-	A = 0.
-	B = Vector{Float64}(undef, NLegendre)
-	@inbounds for k ∈ 1:NLegendre
-		a = Z₀[k] / σ[]
-		B[k] = log(W[k]) + logpdf(𝒩, Z₀[k] - ω) - log1mexp(lnpH + logdiffcdf(𝒩, a+z̄divσ, a-z̄divσ) * m[])
-		A += exp(B[k])
+	𝒩σₘ = Normal(0,σₘ[])
+
+	f_z₀ᵢ = @. pdf(𝒩, Z₀-ω)
+	lnx = @. logdiffcdf(𝒩, Z₀divσ+z̄divσ, Z₀divσ-z̄divσ)
+	μ̃ₘ = @. μₘ[] + σₘ[]^2 * lnx
+	G = W' * (@. (ccdf(𝒩σₘ,μₘ[]-1) + exp((μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1))) * f_z₀ᵢ)
+
+	# f(z₁|z₀) to be convolved with f(z₀) later using Legendre quadrature; already includes the Legendre weights
+	zdivσ = z/σ[]
+
+	if	!(-eps() < z < eps())
+		modelabsz && (neg2zdivσ = -2zdivσ)
+
+		lnx = @. logdiffcdf(𝒩, Z₀divσ+abs(zdivσ), Z₀divσ-abs(zdivσ))
+		μ̃ₘ = @. μₘ[] + σₘ[]^2 * lnx
+		lnf_Z₁condZ₀ₖ = @. log(W) + logpdf(𝒩, Z₀divσ-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ, μ̃ₘ-1) + log(hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ)
+		modelabsz && (@. lnf_Z₁condZ₀ₖ += log1pexp(Z₀divσ * neg2zdivσ))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
+		f_Z₁condZ₀ = @. exp(lnf_Z₁condZ₀ₖ)
 	end
 
+	f_z₀ᵢⱼ = modelabsz ? pdf(𝒩, ω-z) + pdf(𝒩, ω+z) : pdf(𝒩, ω-z)
+
+	if -z̄ ≤ z ≤ z̄
+		f_no_phack = (pR+pD) * cdf(𝒩σₘ, 1-μₘ[])  # will eventually depend on z₀
+		_lnx = logdiffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ)
+		_μ̃ₘ = μₘ[] + σₘ[]^2 * _lnx
+		f_no_sig_phack = pR < eps() ? f_no_phack : f_no_phack + pR * cdf(𝒩σₘ, _μ̃ₘ-1) * exp((μₘ[] + .5σₘ[]^2 * _lnx) * _lnx)  # probability of either no or unsuccesful p-hacking
+	end
+
+	if -eps() ≤ z ≤ eps()
+		∫ = f_no_sig_phack * f_z₀ᵢⱼ
+	else
+		f_Z₁ = f_Z₁condZ₀'f_z₀ᵢ / σ[]  # constant left out of f_Z₁condZ₀ for speed
+		∫ = -z̄ ≤ z ≤ z̄ ? pD < eps() ? f_Z₁ : f_no_sig_phack * f_z₀ᵢⱼ + pD * f_Z₁ :
+																													f_z₀ᵢⱼ +      f_Z₁
+	end
+
+	∫, pF*G
+end
+
+
+ # f(z|ω). If truncate=true (the default), returns the density conditional on publication
+fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ, truncate=true) = _fZcondΩ(z, ω; modelabsz, NLegendre, pDFR, σ, μₘ, σₘ) |> (y -> truncate ? y[1]/(1 - y[2]) : y[1])
+
+
+# the most time-consuming plotting is of the confidence intervals: for various values of ω, 
+# the cdf F(z|ω) is numerically calculated, many times--iteratively seeking where it hits, e.g., .025 and .975
+# to save time, pre-compute all components of f(z|ω) that do not depend on z, notably logdiffcdf(𝒩(0,σ), Z₀[k]+z̄, Z₀[k]-z̄)
+function FZcondΩ(z, ω; modelabsz::Bool=false, NLegendre=50, pDFR, σ, μₘ, σₘ, rtol=.00001, order=13)
+	pD, pF, pR = pDFR
+
+	Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
+	Z₀ .*= z̄  # change of variables to quadrature over [-z̄, z̄]
+	W  .*= z̄
+	
+	z̄divσ, Z₀divσ = z̄/σ[], Z₀/σ[]
+
+	𝒩σₘ = Normal(0,σₘ[])
+
+	f_Z₁condZ₀   = Vector{Float64}(undef,NLegendre)
+	f_z₀ᵢ        = Vector{Float64}(undef,NLegendre)
+	lnx          = Vector{Float64}(undef,NLegendre)
+	μ̃ₘ           = Vector{Float64}(undef,NLegendre)
+	lnf_Z₁condZ₀ₖ = Vector{Float64}(undef,NLegendre)
+
+	@. f_z₀ᵢ = pdf(𝒩, Z₀-ω)
+	@. lnx = logdiffcdf(𝒩, Z₀divσ+z̄divσ, Z₀divσ-z̄divσ)
+	@. μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
+	G = W' * (@. (ccdf(𝒩σₘ,μₘ[]-1) + exp((μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1))) * f_z₀ᵢ)
+
+	# f(z₁|z₀) to be convolved with f(z₀) later using Legendre quadrature; already includes the Legendre weights
 	function myfZcondΩ(z)
-		zdivσ = z / σ[]
-		b = abs(zdivσ)
+		zdivσ = z/σ[]
 
-		∫ = 0.
-		@inbounds for k ∈ 1:NLegendre
-			a = Z₀divσ[k]
-			if a+b ≉ a-b
-				Fₖ = -.5(zdivσ - a)^2 + (m[]-1) * logdiffcdf(𝒩, a+b, a-b)  # p_H ϕ(z;z_0,σ^2 )
-				modelabsz && (Fₖ += log1pexp(-2a * b))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
-				∫ += exp(B[k] + Fₖ)
-			end
+		if	!(-eps() < z < eps())
+			modelabsz && (neg2zdivσ = -2zdivσ)
+
+			@. lnx = logdiffcdf(𝒩, Z₀divσ+abs(zdivσ), Z₀divσ-abs(zdivσ))
+			@. μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
+			@. lnf_Z₁condZ₀ₖ = log(W) + logpdf(𝒩, Z₀divσ-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ, μ̃ₘ-1) + log(hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ)
+			modelabsz && (@. lnf_Z₁condZ₀ₖ += log1pexp(Z₀divσ * neg2zdivσ))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
+			@. f_Z₁condZ₀ = exp(lnf_Z₁condZ₀ₖ)
 		end
-		∫ *= pH / σ[] * m[]
 
-		f_z = exp(-.5(z-ω)^2)
-		modelabsz && (f_z += exp(-.5(z+ω)^2))
+		f_z₀ᵢⱼ = modelabsz ? pdf(𝒩, ω-z) + pdf(𝒩, ω+z) : pdf(𝒩, ω-z)
 
-		∫ += f_z
 		if -z̄ ≤ z ≤ z̄
-			∫ *= pD
-      ∫ += pR * f_z / (1 - pH * diffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ) ^ m[])
+			f_no_phack = (pR+pD) * cdf(𝒩σₘ, 1-μₘ[])  # will eventually depend on z₀
+			_lnx = logdiffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ)
+			_μ̃ₘ = μₘ[] + σₘ[]^2 * _lnx
+			f_no_sig_phack = pR < eps() ? f_no_phack : f_no_phack + pR * cdf(𝒩σₘ, _μ̃ₘ-1) * exp((μₘ[] + .5σₘ[]^2 * _lnx) * _lnx)  # probability of either no or unsuccesful p-hacking
+		end
+
+		if -eps() ≤ z ≤ eps()
+			∫ = f_no_sig_phack * f_z₀ᵢⱼ
+		else
+			f_Z₁ = f_Z₁condZ₀'f_z₀ᵢ / σ[]  # constant left out of f_Z₁condZ₀ for speed
+			∫ = -z̄ ≤ z ≤ z̄ ? pD < eps() ? f_Z₁ : f_no_sig_phack * f_z₀ᵢⱼ + pD * f_Z₁ :
+				                                                    f_z₀ᵢⱼ +      f_Z₁
 		end
 		∫
 	end
 
 	endpoints = modelabsz ? [0, z̄] : [-Inf, -z̄, z̄]  # since f(z|ω) jumps at ±z̄, do quadrature separately in each range
 	endpoints = [endpoints[findall(<(z), endpoints)]; z]
-	quadgk(myfZcondΩ, endpoints...; rtol, order)[1] * invsqrt2π / (1 - pF * A)
+	quadgk(myfZcondΩ, endpoints...; rtol, order)[1] / (1 - pF * G)
 end
 
 quantFcondΩ(q, ω; kwargs...) = find_zero(z -> q - FZcondΩ(z, ω; kwargs...), (-20,20), Roots.ITP())  # ITP algorithm works well
 
 # likelihood for a collection (vector, step range) of z's for plotting
 # If truncate=true (default), returns the truncated density, i.e., conditional on publication
-function fZ(z; modelabsz=false, NHermite=50, NLegendre=50, p, μ, τ, ν, pDFHR, σ, m, truncate=true)
+function fZ(z; modelabsz=false, NHermite=50, NLegendre=50, p, μ, τ, ν, pDFR, σ, μₘ, σₘ, truncate=true)
   M = HnFmodel(z; d=length(τ), NHermite, NLegendre, modelabsz)
-  ∫, G = _HnFll(M; p,μ,τ,ν,pDFHR,σ,m)
+  ∫, G = _HnFll(M; p,μ,τ,ν,pDFR,σ,μₘ, σₘ)
 	∫ .= exp.(∫)
   truncate && (∫ ./= 1 - G)
   ∫
@@ -239,15 +264,16 @@ struct HnFmodel
 	wt::Vector{Float64}  # observation weights
 	N::Int  # number of z's in data
 	insig::BitVector  # which z's are in insignificant region
+	approxzero::BitVector 	# which z's are basically zero
 	NHermite::Int  # number of quadrature points for integration over z₀ to compute f(z₀)
 	Ω::Vector{Float64}; WHermite::Vector{Float64}; lnWpΩ²::Vector{Float64}  # quadrature nodes & weights
 	NLegendre::Int  # number of quadrature points
 	Z₀::Vector{Float64}; WLegendre::Vector{Float64}; lnWLegendre::Vector{Float64}  # quadrature nodes & weights
   penalty::Function
-	lnf_z₀_ikdict::Dict{Tuple{DataType, Int64}, Vector}  # collections of pre-allocated arrays for use in likelihood computation, separate for Float64, ForwardDiff.Dual, etc.
-	Z₀divσdict::Dict{Tuple{DataType, Int64}, Vector}  # collections of pre-allocated arrays for use in likelihood computation, separate for Float64, ForwardDiff.Dual, etc.
-	lnf_phacked_insig_zdict::Dict{Tuple{DataType, Int64}, Vector}
-	f_Z₁condZ₀dict::Dict{Tuple{DataType, Int64}, Matrix}
+	lnf_z₀_ikdict::Dict{DataType, Vector}  # collections of pre-allocated arrays for use in likelihood computation, separate for Float64, ForwardDiff.Dual, etc.
+	Z₀divσdict::Dict{DataType, Vector}  # collections of pre-allocated arrays for use in likelihood computation, separate for Float64, ForwardDiff.Dual, etc.
+	logf_no_sig_phackdict::Dict{DataType, Vector}
+	f_Z₁condZ₀dict::Dict{DataType, Matrix}
 	∫dict::Dict{Tuple{DataType, Int64}, Matrix}
 
 	function HnFmodel(z, wt=Float64[]; d::Int, modelabsz=false, NHermite=50, NLegendre=50, penalty::Function=(; kwargs...)->0.)
@@ -257,7 +283,7 @@ struct HnFmodel
 		Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
 		Z₀ .*= z̄; W .*= z̄  # change of variables to quadrature over [-z̄, z̄]
 		
-		new(modelabsz, [d], z, wt/mean(wt), length(z), -z̄.≤z.≤z̄, NHermite, Ω, WHermite, log.(WHermite).+.5Ω.^2, NLegendre, Z₀, W, log.(W), penalty, Dict(), Dict(), Dict(), Dict(), Dict())
+		new(modelabsz, [d], z, wt/mean(wt), length(z), -z̄.≤z.≤z̄, -eps().≤z.≤eps(), NHermite, Ω, WHermite, log.(WHermite).+.5Ω.^2, NLegendre, Z₀, W, log.(W), penalty, Dict(), Dict(), Dict(), Dict(), Dict())
 	end
 end
 
@@ -272,39 +298,39 @@ import Base.==
 
 # Compute observation-level likelihood (not log likelihood), file-drawer mass, and expected fraction of initially insignificant results
 function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::AbstractVector{T}, ν::AbstractVector{T}, pDFR::AbstractVector, σ::Vector, μₘ::Vector, σₘ::Vector) where {T}
-	@inline lnI_H(z, zlim=z̄) = logdiffcdf(Normal(z,σ[]), abs(zlim), -abs(zlim))
-
   pD, pF, pR = pDFR
 	𝒩σₘ = Normal(0,σₘ[])
 
-	is = findall(>(1e-6), p)  # nonzero mixture components
+	is = findall(>(1e-6), p)  # ~nonzero mixture components
 	_d = length(is)
 
-	∫                   = get!(                   M.∫dict, (T,_d), Matrix{T}(undef,M.N,_d))::Matrix{T}
-	f_Z₁condZ₀          = get!(          M.f_Z₁condZ₀dict, (T,_d), Matrix{T}(undef,M.N,M.NLegendre))::Matrix{T}
-	lnf_z₀ᵢ           = get!(           M.lnf_z₀_ikdict, (T,_d), Vector{T}(undef, M.NLegendre))::Vector{T}
-	Z₀divσ              = get!(              M.Z₀divσdict, (T,_d), Vector{T}(undef, M.NLegendre))::Vector{T}
-	lnf_phacked_insig_z = get!( M.lnf_phacked_insig_zdict, (T,_d), Vector{T}(undef, M.N))::Vector{T}
+	∫                 = get!(                 M.∫dict, (T,_d), Matrix{T}(undef,M.N,_d))::Matrix{T}
+	lnf_Z₁condZ₀      = get!(        M.f_Z₁condZ₀dict,  T    , Matrix{T}(undef,M.N,M.NLegendre))::Matrix{T}
+	lnf_z₀ᵢ           = get!(         M.lnf_z₀_ikdict,  T    , Vector{T}(undef, M.NLegendre))::Vector{T}
+	Z₀divσ            = get!(            M.Z₀divσdict,  T    , Vector{T}(undef, M.NLegendre))::Vector{T}
+	logf_no_sig_phack = get!( M.logf_no_sig_phackdict,  T    , Vector{T}(undef, M.N))::Vector{T}
 
-	@. Z₀divσ = M.Z₀ / σ[]
+	@. Z₀divσ = M.Z₀ / σ[]; z̄divσ = z̄ / σ[]
 	lnf_no_phack = log(pR+pD) + logcdf(𝒩σₘ, 1-μₘ[])  # will eventually depend on z₀
 
 	# f(z₁|z₀) to be convolved with f(z₀) later using Legendre quadrature; already includes the Legendre weights
-	Threads.@threads for j ∈ 1:M.N  # for each z value/interpolation point
+	Threads.@threads for j ∈ eachindex(M.z)  # for each z value/interpolation point
 		@inbounds begin
 			z = M.z[j]; zdivσ = z/σ[]
+			M.modelabsz && (neg2zdivσ = -2zdivσ)
 			if	!(-eps() < z < eps())
-				for k ∈ 1:M.NLegendre
-					lnx = lnI_H(M.Z₀[k],z)
+				for k ∈ eachindex(M.Z₀)  # for each z₀ quadrature point
+					lnx = logdiffcdf(𝒩, Z₀divσ[k]+abs(zdivσ), Z₀divσ[k]-abs(zdivσ))
 					μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
-					f_Z₁condZ₀[j,k] = exp(M.lnWLegendre[k] + logpdf(𝒩, zdivσ-Z₀divσ[k]) #=- log(σ[])=# + (μₘ[]-1 + σₘ[]^2 * .5lnx) * lnx + logcdf(𝒩σₘ, μ̃ₘ-1)) * (hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ)
+					lnf_Z₁condZ₀[j,k] = M.lnWLegendre[k] + logpdf(𝒩, Z₀divσ[k]-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ, μ̃ₘ-1) + log(hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ)
+					M.modelabsz && (lnf_Z₁condZ₀[j,k] += log1pexp(Z₀divσ[k] * neg2zdivσ))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
 				end
 			end
 
 			if M.insig[j]
-				lnx = lnI_H(z)
+				lnx = logdiffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ)
 				μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
-				lnf_phacked_insig_z[j] = log(pR) + logcdf(𝒩σₘ, μ̃ₘ-1) + (μₘ[] + .5σₘ[]^2 * lnx) * lnx
+				logf_no_sig_phack[j] = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logcdf(𝒩σₘ, μ̃ₘ-1) + (μₘ[] + .5σₘ[]^2 * lnx) * lnx)  # probability of either no or unsuccesful p-hacking
 			end
 		end
 	end
@@ -320,71 +346,46 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 		_νᵢ = ν[i]/2 + .5
 		D = (1 + τ[i]^2) * ν[i]
 		Cᵢ = log(p[i]) - logbeta(ν[i]/2,.5) - .5log(D)  # contains constant factor in t pdf, in logs
-		lnf_z₀_i(z₀) = logsumexp(begin  # log [∫_(-∞)^∞ ϕ(z₀;ω)t(ω;μ,τᵢ²,νᵢ)dω] sans ln Cᵢ factor
+		lnf_z₀_i(z₀) = logsumexp(begin  # ln [∫_(-∞)^∞ ϕ(z₀;ω)t(ω;μ,τᵢ²,νᵢ)dω] sans ln Cᵢ factor
 																d = (z₀ - μ[]) / sqrt_τᵢ²
 																lnwpx² - halfinv_τᵢ² * (x - d / τᵢ²)^2 - log1p((x + d)^2 / D) * _νᵢ
 															end
 															for (x,lnwpx²) ∈ zip(M.Ω, M.lnWpΩ²))
 
 		I₀ᵢ = Gᵢ = zero(T)
-		@inbounds for k ∈ 1:M.NLegendre
-			lnf_z₀ᵢₖ = lnf_z₀ᵢ[k] = lnf_z₀_i(M.Z₀[k])
+		for k ∈ eachindex(M.Z₀)  # for each z₀ quadrature point
+			lnf_z₀ᵢ[k] = lnf_z₀ᵢₖ = lnf_z₀_i(M.Z₀[k])
 			I₀ᵢ += exp(M.lnWLegendre[k] + lnf_z₀ᵢₖ)
 
-			lnx = lnI_H(M.Z₀[k])
+			lnx = logdiffcdf(𝒩, Z₀divσ[k]+z̄divσ, Z₀divσ[k]-z̄divσ)
 			μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
 			Gᵢ += M.WLegendre[k] * (ccdf(𝒩σₘ,μₘ[]-1) + exp((μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1))) * exp(lnf_z₀ᵢₖ)
 		end
-		G += exp(Cᵢ) * Gᵢ
+		G  += exp(Cᵢ) * Gᵢ
 		I₀ += exp(Cᵢ) * I₀ᵢ
 
-		Threads.@threads for j ∈ 1:M.N  # for each z value/interpolation point
+		Threads.@threads for j ∈ eachindex(M.z)  # for each z value/interpolation point
 			@inbounds begin
 				z = M.z[j]
 
-				f_Z₁ = zero(T)
-				if !(-eps() < z < eps())
-					@inbounds for k ∈ 1:M.NLegendre
-						f_Z₁ += f_Z₁condZ₀[j,k] * exp(lnf_z₀ᵢ[k])
-					end
-					f_Z₁ /= σ[]  # constant left out of f_Z₁condZ₀ for speed
-				end
-
-				if M.insig[j]
-					∫[j,i] = Cᵢ + log((exp(lnf_no_phack) + exp(lnf_phacked_insig_z[j])) * exp(lnf_z₀_i(z)) + pD * f_Z₁)
+				lnf_z₀ᵢⱼ = M.modelabsz ? logsumexp(lnf_z₀_i(z), lnf_z₀_i(-z)) : lnf_z₀_i(z)
+				if M.approxzero[j]
+					∫[j,_i] = Cᵢ + logf_no_sig_phack[j] + lnf_z₀ᵢⱼ
 				else
-					∫[j,i] = Cᵢ + log(exp(lnf_z₀_i(z)) + f_Z₁)
+					lnf_Z₁ = logsumexp(lnf_Z₁condZ₀[j,k] + lnf_z₀ᵢ[k] for k ∈ eachindex(M.Z₀)) - log(σ[])  # last term left out of lnf_Z₁condZ₀ for speed
+					∫[j,_i] = Cᵢ + (M.insig[j] ? pD < eps() ? lnf_Z₁ : logsumexp(logf_no_sig_phack[j] + lnf_z₀ᵢⱼ, log(pD) + lnf_Z₁) :
+						                                                 logsumexp(                       lnf_z₀ᵢⱼ,           lnf_Z₁)  )
 				end
 			end
 		end
 	end
-  logsumexp!(lnf_phacked_insig_z, ∫), pF * G, I₀  # sum across mixture components, into `lnf_phacked_insig_z` because it's the right size and already allocated
+  logsumexp!(logf_no_sig_phack, ∫), pF * G, I₀  # sum across mixture components, into `logf_no_sig_phack` because it's the right size and already allocated
 end
 
-p = [.7,.3]
-μ = [0.7]
-τ = [1.2,2.7]
-ν = [10., 20.]
-pD = .4
-pF = .4
-pR = .2
-σ = [.2]
-μₘ = [5.]
-σₘ = [5.]
-d = length(p)
-modelabsz = false
-pDFR = [pD, pF, pR]
-
-zs = -2:2.
-M = HnFmodel(collect(zs); d=2)
-t=_HnFll(M;p,μ,τ,ν,pDFR,σ,μₘ,σₘ); t[1] .- log(1 - t[2]) |> sum  # -9.336415017292875
-
-#=HnFden.(zs) .|> log |> sum),=# (t=_HnFll2(M;p,μ,τ,ν,pDFR,σ,μₘ,σₘ); t[1] .- log(1 - t[2]) |> sum)  # -9.45112937504285
-
 # returns negative of penalized log likelihood
-function HnFll(M::HnFmodel; pDFHR, kwargs...)
-	∫, G, I₀ = _HnFll(M; pDFHR, kwargs...)
-	(iszero(length(M.wt)) ? ThreadsX.sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -G) + M.penalty(; pDFHR, file_drawer_insig = G/I₀, kwargs...)
+function HnFll(M::HnFmodel; pDFR, kwargs...)
+	∫, G, I₀ = _HnFll(M; pDFR, kwargs...)
+	(iszero(length(M.wt)) ? ThreadsX.sum(∫) : dot(M.wt,∫)) - xlog1py(M.N, -G) + M.penalty(; pDFR, file_drawer_insig = G/I₀, kwargs...)
 end
 
 
@@ -436,122 +437,6 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 	(ω=ω, z₀=z₀, m=m, z₁=z₁, z=z)
 end
 
-
-p = [.7,.3]
-μ = [0.7]
-τ = [1.2,2.7]
-ν = [10., 20.]
-pD = .4
-pF = .4
-pR = .2
-σ = [.2]
-μₘ = [5.]
-σₘ = [5.]
-d = length(p)
-modelabsz = false
-pDFR = [pD, pF, pR]
-kwargs = (p=p, μ=μ, τ=τ, ν=ν, pDFR=pDFR, σ=σ, μₘ=μₘ, σₘ=σₘ, modelabsz=modelabsz)
-
-sim = HnFDGP(10_000_000; kwargs..., truncate=false)
-
-lnI_H(z₀, zlim=z̄) = logdiffcdf(Normal(z₀,σ[]), abs(zlim), -abs(zlim))
-f_phacked_insig_z(z₀) = (lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; exp((μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1)))
-f_Z₀(z₀) = quadgk(ω->fZ₀condΩ(z₀,ω) * fΩ(ω; p, μ, τ, ν), -Inf, Inf)[1]
-f_insig = hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; (ccdf(𝒩σₘ,μₘ[]-1) + exp((μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1))) * fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1]
-f_Z₁(z₁) = hcubature(v->begin
-												  (ω,z₀)=v
-													-eps() < z₁ < eps() && return 0.
-												  lnx = lnI_H(z₀,z₁)
-													μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
-													exp(logpdf(Normal(z₀,σ[]), z₁) + (μₘ[]-1 + σₘ[]^2 * .5lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1)) * (hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ) *
-															fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)
-                        end, [-100., -z̄], [100., z̄]; initdiv=10)[1]
-HnFden(z) = (-z̄≤z≤z̄ ? ((pR+pD) * cdf(𝒩σₘ,.5-μₘ[]) + pR * f_phacked_insig_z(z)) * f_Z₀(z) + pD * f_Z₁(z) : 
-                                                                                  f_Z₀(z) +      f_Z₁(z)  ) / (1 - pF * f_insig)
-
-zs = -2:2.
-M = HnFmodel(collect(zs); d=2)
-(HnFden.(zs) .|> log |> sum), (t=_HnFll(M;p,μ,τ,ν,pDFR,σ,μₘ,σₘ); t[1] .- log(1 - t[2]) |> sum)
-
-zplot = -10:.01:10
-f = Figure()
-Axis(f[1,1], limits=(-10, 10, nothing, nothing))
-hist!(sim.z[.!isnan.(sim.z)], bins=1000, normalization=:pdf)
-HnF = HnFden.(zplot)
-lines!(zplot, HnF, color=:red)
-f |> display
-sum(HnF)*step(zplot)
-
-# Pr[validly significant]
-1 - hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1], 
-   mean(@. abs(sim.z₀)>z̄)
-
-𝒩σₘ = Normal(0,σₘ[])
-
-# Pr[p-hacked to significance]
-hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; (cdf(𝒩σₘ,μₘ[]-.5) - exp(logpdf(𝒩σₘ,μₘ[]) - logpdf(𝒩σₘ,μ̃ₘ) + logcdf(𝒩σₘ,μ̃ₘ-.5))) * fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1], 
-   mean(@. abs(sim.z₀)<z̄ && abs(sim.z)>z̄)
-
-# Pr[initially insig & no p-hacking]
-hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; ccdf(𝒩σₘ,μₘ[]-.5) * fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1], 
-   mean(@. abs(sim.z₁)<z̄ && sim.z₀==sim.z₁),
-   mean(@. (abs(sim.z)≤z̄ || isnan(sim.z)) && sim.z₀==sim.z₁)
-
-# Pr[insig or file-drawered despite p-hacking]
-hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; exp(logpdf(𝒩σₘ,μₘ[]) - logpdf(𝒩σₘ,μ̃ₘ) + logcdf(𝒩σₘ,μ̃ₘ-.5)) * fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1], 
-   mean(@. abs(sim.z₀)<z̄ && abs(sim.z₁)<z̄ && sim.z₀!=sim.z₁),
-   mean(@. abs(sim.z₀)≤z̄ && sim.z₀!=sim.z₁ && (abs(sim.z)≤z̄ || isnan(sim.z)))
-
-# Pr[insig and published or file-drawered] (sum of previous two)
-f_insig = hcubature(v->((ω,z₀)=v; lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; (ccdf(𝒩σₘ,μₘ[]-.5) + exp(logpdf(𝒩σₘ,μₘ[]) - logpdf(𝒩σₘ,μ̃ₘ) + logcdf(𝒩σₘ,μ̃ₘ-.5))) * fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)), [-100., -z̄], [100., z̄])[1]; 
-   f_insig,
-	 mean(@. abs(sim.z₁)<z̄),
-   mean(@. (abs(sim.z)≤z̄ || isnan(sim.z)))
-
-
-# Pr[file-drawered]
-pF * f_insig, 
-   mean(@. isnan(sim.z))
-
-# no p-hacking or file-drawering
-nodistortion = @. (sim.z==sim.z₁==sim.z₀) * sim.z₁ .|> x-> isnan(x) ? 0. : x
-f = Figure()
-Axis(f[1,1], limits=(-1.96, 1.96, 0, .1))
-hist!(nodistortion, bins=1000, normalization=:pdf)
-zplot = -1.96:.01:1.96
-f_Zplot = (pR+pD) * cdf(𝒩σₘ,.5-μₘ[]) * f_Z₀.(zplot)
-lines!(zplot, f_Zplot)
-f |> display
-
-zplot=-.1:.001:.1;lines(zplot,f_Z₁.(zplot))
-
-# p-hacking tried and rejected, so initial measurement is reported
-reverted = @. (sim.z==sim.z₀≠sim.z₁) * sim.z .|> x-> isnan(x) ? 0. : x
-f = Figure()
-Axis(f[1,1], limits=(-1.96, 1.96, 0, .1))
-hist!(reverted, bins=1000, normalization=:pdf)
-zplot = -1.96:.01:1.96
-f_Zplot =  pR * f_phacked_insig_z.(zplot) .* f_Z₀.(zplot)
-lines!(zplot, f_Zplot)
-f |> display
-
-phackedsig = @. (sim.z==sim.z₀ && abs(sim.z)>z̄) * sim.z
-
-validsig = @. (abs(sim.z₀)>z̄) * sim.z
-sig = @. (!isnan(sim.z)) * sim.z
-hist!(phackedsig, bins=1000, normalization=:pdf)
-hist!(validsig, bins=1000, normalization=:pdf)
-hist!(sig, bins=1000, normalization=:pdf)
-lines!(zplot, f_Z₁plot)
-f |> display
-
-f_Z₀plot = f_Z₀.(zplot)
-
-f_Zplot = (f_Z₁.(zplot) + f_Z₀.(zplot)) 
-lines!(zplot, f_Z₀plot)
-lines!(zplot, f_Zplot)
-
-x = 1e-60; exp(logpdf(Normal(), μₘ[]/σₘ[]) - logcdf(Normal(), (μₘ[]-1)/σₘ[]) + logcdf(Normal(), (μₘ[]-1)/σₘ[] + σₘ[] * log(x)) - logpdf(Normal(), μₘ[]/σₘ[] + σₘ[] * log(x))) * σₘ[]/x * (hr((μₘ[]-1)/σₘ[] + σₘ[] * log(x)) + μₘ[]/σₘ[] + σₘ[] * log(x))
 @kwdef mutable struct HnFresult<:RegressionModel
 	estname::String
 	modelabsz::Bool
@@ -627,8 +512,8 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 	println("\nModeling $estname data with $d mixture component(s)")
 	
 	# set starting values & parameter transformes, allowing caller to override defaults
-	from  = merge((p=fill(1/d,d), μ=[0.]     , τ=collect(LinRange(1,d,d)), ν=fill(1.,d), pDFHR=fill(.25,4), σ=[1.]      , m=[2.]        ),  from)
-  xform = merge((p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , ν=bcast(log), pDFHR=SimplextoRⁿ, σ=bcast(log), m=bcast(log1m)), xform)
+	from  = merge((p=fill(1/d,d), μ=[0.]     , τ=collect(LinRange(1,d,d)), ν=fill(1.,d), pDFR=fill(.25,4), σ=[1.]      , μₘ=[0.]    , σₘ=[10.]     ),  from)
+  xform = merge((p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , ν=bcast(log), pDFR=SimplextoRⁿ, σ=bcast(log), μₘ=identity, σₘ=bcast(log)), xform)
 
 	M = HnFmodel(z, wt; d, modelabsz, NLegendre, NHermite, penalty)
 	
@@ -668,36 +553,52 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 	t = findall(x->abs(x)>.001, coefdict[:p])  # non-trivial mixture components
 	if length(t) < d
 		println("Dropping mixture components with negligible weight: keeping $(length(t)) of $d components")
-		coefdict = (p=coefdict.p[t], μ=coefdict.μ, τ=coefdict.τ[t], ν=coefdict.ν[t], pDFHR=coefdict.pDFHR, σ=coefdict.σ, m=coefdict.m)
+		coefdict = (p=coefdict.p[t], μ=coefdict.μ, τ=coefdict.τ[t], ν=coefdict.ν[t], pDFR=coefdict.pDFR, σ=coefdict.σ, μₘ=coefdict.μₘ, σₘ=coefdict.σₘ)
 		I = vcat(t, 1+d, t.+(1+d), t.+(1+2d), 2+3d:size(vcov,1))  # indexes of kept parameters in full parameter vector
 		vcov = vcov[I,I]
 		M.d[] = d = length(t)
 	end
 
 	one2D = first(Unicode.graphemes("₁₂₃₄"),d)
-	coefnames = vcat("p".*one2D, "μ", "τ".*one2D, "ν".*one2D, "pD", "pF", "pH", "pR", "σ", "m")
+	coefnames = vcat("p".*one2D, "μ", "τ".*one2D, "ν".*one2D, "pD", "pF", "pH", "pR", "σ", "μₘ", "σₘ")
 	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict...), vcov, k=length(θ), n=size(z,1), d, ll=-Optim.minimum(res))
 end
 
 function add_derived_stats!(est::HnFresult)
-	function derived_stats(; p,μ,τ,ν,pDFHR,σ,m)
-		pD, pF, pH, pR = pDFHR
+	function derived_stats(; p,μ,τ,ν,pDFR,σ,μₘ,σₘ)
+		pD, pF, pR = pDFR
 
-		I_H(z₀, zlim=z̄) = diffcdf(Normal(z₀,σ[]), zlim, -zlim) ^ m[]
+		𝒩σₘ = Normal(0,σₘ[])
+		lnI_H(z₀, zlim=z̄) = logdiffcdf(Normal(z₀,σ[]), abs(zlim), -abs(zlim))
+
+		F_no_phack = ccdf(𝒩σₘ,μₘ[]-1)  # Pr[no p-hacking| |z₀|<z̄]; will depend on z₀ later
 		f_ωz₀(v) = ((ω,z₀)=v; fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν))  # f(z₀)
-		g_ωz₀(v) = ((_,z₀)=v; f_ωz₀(v) / (1 - pH * I_H(z₀)))  # f * "shots on goal"
-		I₀   = hcubature(f_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1] 
-		S₂₄  = hcubature(f_ωz₀, [-100,-4], [100,-2]; initdiv=10)[1] + hcubature(f_ωz₀, [-100,2], [100,4]; initdiv=10, rtol=1e-3, atol=1e-3)[1]  # actually marginally significant
-		G    = hcubature(g_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1] 
-		Sh₂₄ = pH * hcubature(v -> ((ω,z₀)=v; g_ωz₀(v) * (I_H(z₀,4) - I_H(z₀,2))), [-100,-z̄], [100,z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]  # p-hacked "marginally significant"
+		f_phacked_insig_z(z₀) = (lnx = lnI_H(z₀); μ̃ₘ = μₘ[] + σₘ[]^2 * lnx; exp((μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1)))  #  Pr[p-hacking tried and |z₁|<z̄ | |z₀|<z̄]
+		f_insig(z₀) = F_no_phack + f_phacked_insig_z(z₀)  #  Pr[p-hacking not tried or (p-hacking tried and |z₁|<z̄) | |z₀|<z̄]
 
+		f_Z₁(z₁) = hcubature(v->begin  # distribution of p-hacked z₁
+												  (ω,z₀)=v
+													-eps() < z₁ < eps() && return 0.
+												  lnx = lnI_H(z₀,z₁)
+													μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
+													exp(logpdf(Normal(z₀,σ[]), z₁) + (μₘ[]-1 + σₘ[]^2 * .5lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1)) * (hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ) *
+															fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)
+                        end, [-100., -z̄], [100., z̄]; initdiv=10)[1]
+
+		I₀      = hcubature(f_ωz₀, [-100,-z̄], [100, z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]  # Pr[true insigificant]
+		F_insig = hcubature(v->((ω,z₀)=v; f_insig(z₀) * f_ωz₀(v)), [-100., -z̄], [100., z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]  # Pr[|z₀|,|z₁| ≤ z̄]
+		S₂₄     = hcubature(f_ωz₀, [-100,-4], [100,-2]; initdiv=10)[1] + hcubature(f_ωz₀, [-100,2], [100,4]; initdiv=10, rtol=1e-3, atol=1e-3)[1]  # validly "marginally significant" (2<|z|<4)
+		Sh₂₄    = quadgk(z₁->f_Z₁(z₁),-4,-2; rtol=1e-3, atol=1e-3)[1] +   # p-hacked "marginally significant"
+		          quadgk(z₁->f_Z₁(z₁), 2, 4; rtol=1e-3, atol=1e-3)[1]
+
+		# equivocation of Ω w.r.t. reported Z
 		infty = 15
-		_M = HnFmodel([0.]; d=est.d)
-		H_Ω_Z(;p,μ,τ,ν,pDFHR,σ,m) =   (-hcubature(v->((ω,z)=v; t=fΩ(ω; p, μ, τ, ν) *  fZcondΩ( z,ω;pDFHR,σ,m, truncate=false); xlogy(t,t/fZ([z ]  ; p, μ, τ, ν, pDFHR, σ, m, truncate=false)[] )), [-infty,-infty], [infty,   -z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
-                                   -hcubature(v->((ω,z)=v; t=fΩ(ω; p, μ, τ, ν) *  fZcondΩ( z,ω;pDFHR,σ,m, truncate=false); xlogy(t,t/fZ([z ]  ; p, μ, τ, ν, pDFHR, σ, m, truncate=false)[] )), [-infty,-z̄    ], [infty,    z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
-                                   -hcubature(v->((ω,z)=v; t=fΩ(ω; p, μ, τ, ν) *  fZcondΩ( z,ω;pDFHR,σ,m, truncate=false); xlogy(t,t/fZ([z ]  ; p, μ, τ, ν, pDFHR, σ, m, truncate=false)[] )), [-infty, z̄    ], [infty,infty]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
-      -(pDFHR[2]<eps() ? pDFHR[2] : quadgk(   ω->(         t=fΩ(ω; p, μ, τ, ν) * _fZcondΩ(0.,ω;pDFHR,σ,m)[2]             ; xlogy(t,t/_HnFll(_M; p, μ, τ, ν, pDFHR, σ, m                )[2])), -infty, infty)[1]))
-		entropy_gain = H_Ω_Z(;p,μ,τ,ν,pDFHR,σ,m) - H_Ω_Z(;p,μ,τ,ν,pDFHR=[1.,0,0,0], σ, m)
+		_M = HnFmodel(Float64[]; d=est.d)  # to avoid putting an unoptimized 2-d integral inside a 1-D integral, here use the likelihood evaluator to compute file-drawered fraction
+		H_Ω_Z(;p,μ,τ,ν,pDFR,σ,μₘ,σₘ) = (-hcubature(v->((ω,z)=v; t=fΩ(ω; p, μ, τ, ν) *  fZcondΩ( z,ω;pDFR,σ,μₘ,σₘ, truncate=false); xlogy(t,t/fZ([z ]  ; p, μ, τ, ν, pDFR, σ, μₘ, σₘ, truncate=false)[] )), [-infty,-infty], [infty,   -z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
+                                    -hcubature(v->((ω,z)=v; t=fΩ(ω; p, μ, τ, ν) *  fZcondΩ( z,ω;pDFR,σ,μₘ,σₘ, truncate=false); xlogy(t,t/fZ([z ]  ; p, μ, τ, ν, pDFR, σ, μₘ, σₘ, truncate=false)[] )), [-infty,-z̄    ], [infty,    z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
+                                    -hcubature(v->((ω,z)=v; t=fΩ(ω; p, μ, τ, ν) *  fZcondΩ( z,ω;pDFR,σ,μₘ,σₘ, truncate=false); xlogy(t,t/fZ([z ]  ; p, μ, τ, ν, pDFR, σ, μₘ, σₘ, truncate=false)[] )), [-infty, z̄    ], [infty,infty]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
+         -(pDFR[2]<eps() ? pDFR[2] : quadgk(   ω->(         t=fΩ(ω; p, μ, τ, ν) * _fZcondΩ(0.,ω;pDFR,σ,μₘ,σₘ)[2]             ; xlogy(t,t/_HnFll(_M; p, μ, τ, ν, pDFR, σ, μₘ, σₘ                )[2])), -infty, infty)[1]))
+		entropy_gain = H_Ω_Z(;p,μ,τ,ν,pDFR,σ,μₘ,σₘ) - H_Ω_Z(;p,μ,τ,ν,pDFR=[1.,0,0], σ,μₘ,σₘ)
 
 		H_z₀(τ_multiplier) = (-hcubature(v -> ((ω,_)=v; xlogx(fΩ(ω; p, μ, τ=τ*τ_multiplier, ν) * fZ₀condΩ(v...))), [-infty,-infty], [infty,   -z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
 						              -hcubature(v -> ((ω,_)=v; xlogx(fΩ(ω; p, μ, τ=τ*τ_multiplier, ν) * fZ₀condΩ(v...))), [-infty,-z̄    ], [infty,    z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
@@ -705,27 +606,28 @@ function add_derived_stats!(est::HnFresult)
 
 		equiv_sample_reduction = 1 - find_zero(τ_multiplier -> H_z₀(τ_multiplier) - (H_z₀(1) - entropy_gain), (0.01, 1.5); rtol=1e-3, atol=1e-3)
 
+		 Sh₂₄ / (Sh₂₄ + S₂₄), mean(@. sim.z[2<abs(sim.z)<4]!=sim.z₀[2<abs(sim.z)<4])
 		[
-			pF*G / I₀                         # fraction of insignificant studies file-drawered
-			pF*G                              # fraction of all studies file-drawered
-			pR*G / I₀ + pD                    # fraction of insignificant published as is
-			1 - (1-pH)*G/I₀                   # fraction of initially insignificant that lead to published, significant, p-hacked results
-			pD * (G/I₀ - 1)                   # fraction of initially insignificant that lead to published, insignificant, p-hacked results
+			pF*F_insig                              # fraction of all studies file-drawered
+			pF*F_insig / I₀                         # fraction of initially insignificant studies file-drawered
+			pR * F_insig / I₀ + pD * F_no_phack     # fraction of initially insignificant published as is
+			1 - F_insig / I₀                        # fraction of initially insignificant that lead to published, significant, p-hacked results
+			pD * (F_insig / I₀ - F_no_phack)        # fraction of initially insignificant that lead to published, insignificant, p-hacked results
 
-			pD * (G - I₀) / ((pD+pR) * G)     # fraction of insignificant results that are p-hacked
-			(I₀ - (1-pH)*G) / (1 - (1-pH)*G)  # fraction of significant results that are p-hacked
-			Sh₂₄ / (Sh₂₄ + S₂₄)               # p-hacked fraction of "marginally significant" in Star Wars (2<|z|<4)
+			pD / (1-pF) * (1 - F_no_phack / F_insig * I₀)     # fraction of published insignificant results that are p-hacked
+			(I₀ - F_insig) / (1 - F_insig)          # fraction of significant results that are p-hacked
+			Sh₂₄ / (Sh₂₄ + S₂₄)                     # p-hacked fraction of "marginally significant" in Star Wars (2<|z|<4)
 
-			entropy_gain/log(2)               # H(Ω|Z) - H(Ω|Z₀), in bits
+			entropy_gain/log(2)                     # H(Ω|Z) - H(Ω|Z₀), in bits
 			equiv_sample_reduction
 		]
 	end
-	# [ForwardDiff.derivative(σ->derived_stats(;p=est.coefdict.p,μ=est.coefdict.μ,τ=est.coefdict.τ,ν=est.coefdict.ν,pDFHR=est.coefdict.pDFHR,σ=[σ],m=est.coefdict.m), .5)[9] for est ∈ (Setal, GMpolisci, GMsoc, SW, BCH, ABetal, vZSS, V)]
+	# [ForwardDiff.derivative(σ->derived_stats(;p=est.coefdict.p,μ=est.coefdict.μ,τ=est.coefdict.τ,ν=est.coefdict.ν,pDFR=est.coefdict.pDFR,σ=[σ],m=est.coefdict.m), .5)[9] for est ∈ (Setal, GMpolisci, GMsoc, SW, BCH, ABetal, vZSS, V)]
 
 	d = length(est.coefdict.p)
-	est.coef = est.coef[1:3d+7]  # remove old derived stats if any; for debugging, allows this function to be called repeatedly
-	est.vcov = est.vcov[1:3d+7, 1:3d+7]
-	est.coefnames = est.coefnames[1:3d+7]
+	est.coef = est.coef[1:3d+8]  # remove old derived stats if any; for debugging, allows this function to be called repeatedly
+	est.vcov = est.vcov[1:3d+8, 1:3d+8]
+	est.coefnames = est.coefnames[1:3d+8]
 
 	extractor = zip(keys(est.coefdict), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), est.coefdict, init=0))
 	coefdict_maker(v) = NamedTuple(p=>v[e] for (p,e) ∈ extractor)
@@ -733,7 +635,7 @@ function add_derived_stats!(est::HnFresult)
 	est.vcov = Δ * est.vcov * Δ'  # covariance matrix of full model parameters
 	est.vcov[diagind(est.vcov)] .= max.(0, est.vcov[diagind(est.vcov)])
 	est.coef = vcat(est.coefdict..., derived_stats(;est.coefdict...)...)
-	est.coefnames = vcat(est.coefnames, "frac_insig_file_drawered", "overall_file_drawer_frac", 
+	est.coefnames = vcat(est.coefnames, "overall_file_drawer_frac", "frac_insig_file_drawered", 
 										 "frac_insig_pubbed_as_is", "sig_p_hacked_frac", "insig_p_hacked_frac",
 										 "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig", "H(Ω|Z)-H(Ω|Z₀)", "equiv_sample_reduction")
 	show(regtable(est))
@@ -749,8 +651,8 @@ end
 function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
 	t = est.coefdict
 	kwargsω = (p=t.p, μ=t.μ, τ=t.τ, ν=t.ν)
-	kwargsz = (pDFHR=t.pDFHR, σ=t.σ, m=t.m)
-	kwargsz0 = (pDFHR=[1.,0.,0.,0.], σ=[1.], m=[1.])  # no distortion
+	kwargsz = (pDFR=t.pDFR, σ=t.σ, μₘ=t.μₘ, σₘ=t.σₘ)
+	kwargsz0 = (pDFR=[1.,0.,0.], σ=[1.], μₘ=[-10.], σₘ=[.0001])  # no distortion
 
 	f = Figure(size=(1500,900))
 
@@ -763,7 +665,7 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 
   pplottrue                     = map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν),  z)), _zplot)
   est.modelabsz && (pplottrue .+= map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν), -z)), _zplot))
-	pplottrue ./= 1 - est.coef[findfirst(==("overall_file_drawer_frac"), est.coefnames)]
+	# pplottrue ./= 1 - est.coef[findfirst(==("overall_file_drawer_frac"), est.coefnames)]
 
 	pplotinitial = fZ(_zplot; kwargsω..., kwargsz0..., modelabsz=est.modelabsz, NLegendre, NHermite)
 	pplotfit     = fZ(_zplot; kwargsω..., kwargsz ..., modelabsz=est.modelabsz, NLegendre, NHermite)
@@ -865,21 +767,21 @@ modelabsz = false
 pDFR = [pD, pF, pR]
 kwargs = (p=p, μ=μ, τ=τ, ν=ν, pDFR=pDFR, σ=σ, μₘ=μₘ, σₘ=σₘ, modelabsz=modelabsz)
 
-n = 100_000
+n = 10_000_000
 Random.seed!(1232)
-sim = HnFDGP(n; kwargs...)
+sim = HnFDGP(n; kwargs..., truncate=false)
 
 f = Figure()
 Axis(f[1,1], limits=(modelabsz ? 0 : -10, 10, nothing,nothing))
 hist!(sim.z[abs.(sim.z).<100], bins=10*2*100, normalization=:pdf)
 zplot = (modelabsz ? 0 : -10):.01:10
-lines!(zplot, fZ(zplot; NHermite=50, kwargs...), color=:orange, label="True parameters")
+lines!(zplot, fZ(zplot; NHermite=50, kwargs...), color=:orange, label="True model")
 f|>display
 
-penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(m[])) + logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
+penalty(; τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
 res = HnFfit(sim.z; d, modelabsz, penalty, estname="simulated", extended_trace=false)  # penalized maximum likelihood
 print(res.coefdict)
-lines!(zplot, fZ(zplot; modelabsz, res.coefdict...)[:,1], color=:green, label="Estimated parameters")
+lines!(zplot, fZ(zplot; modelabsz, res.coefdict...)[:,1], color=:green, label="Fitted model")
 
 f[0, :] = Label(f, "Simulation vs model")
 axislegend(position=:lt, framevisible=false)
@@ -892,9 +794,9 @@ f |> display
 
 @time begin
 	# penalty function for parameters that can generate singularities
-  penalty(; m::Vector{T}, τ::Vector{T}, σ::Vector{T}, file_drawer_insig::T, kwargs...) where {T} = 
-		logpdf(Exponential(log(10)), m[]-1) + 
+  penalty(; τ::Vector{T}, σ::Vector{T}, σₘ::Vector{T}, file_drawer_insig::T, kwargs...) where {T} = 
 		logpdf(Normal(0,5), log(σ[])) + 
+		logpdf(Normal(0,5), log(σₘ[])) + 
 		sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) +
 		logpdf(Beta(2,1),file_drawer_insig)
 
@@ -978,7 +880,7 @@ f |> display
 							estim_decoration = (coef,p)->coef,  # no stars
 							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
-							keep = ["p₁", "p₂", "p₃", "p₄", "μ", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pH", "pD", "pR", "σ", "m", "frac_insig_file_drawered", "frac_insig_pubbed_as_is", "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig","H(Ω|Z)-H(Ω|Z₀)", "equiv_sample_reduction"],
+							keep = ["p₁", "p₂", "p₃", "p₄", "μ", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pH", "pD", "pR", "σ", "μₘ", "σₘ", "frac_insig_file_drawered", "frac_insig_pubbed_as_is", "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig","H(Ω|Z)-H(Ω|Z₀)", "equiv_sample_reduction"],
 							estimformat = "%0.3g",
 							statisticformat = "%0.3g",
 							number_regressions = false,
