@@ -12,7 +12,7 @@ const 𝒩 = Normal()
 const z̄ = quantile(𝒩, .975)  # 1.96
 
 @inline diffcdf(N,b,a) = cdf(N,b) - cdf(N,a)
-@inline hr(d,x) = exp(logpdf(d,x) - logcdf(d,x))
+@inline hr(d,x) = exp(logpdf(d,x) - logccdf(d,x))  # standard normal hazard ratio/inverse Mills ratio
 @inline sqrt0(x::T) where {T} = x<0 ? zero(T) : sqrt(x)
 
 
@@ -112,8 +112,8 @@ InverseFunctions.inverse(::typeof(log1m)) = expp1
 bcast = Broadcast.BroadcastFunction  # short-hand for forming the broadcasting version of a function, which works with InverseFunctions
 
 
-# compute f(z|ω) & F(file drawer|ω)
-function _fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ)
+# compute log [f(z|ω)] & F(file drawer|ω)
+function lnfZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ)
 	pD, pF, pR = pDFR
 
 	Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
@@ -124,10 +124,10 @@ function _fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ)
 
 	𝒩σₘ = Normal(0,σₘ[])
 
-	f_z₀ᵢ = @. pdf(𝒩, Z₀-ω)
+	lnf_z₀ᵢ = @. logpdf(𝒩, Z₀-ω)
 	lnx = @. logdiffcdf(𝒩, Z₀divσ+z̄divσ, Z₀divσ-z̄divσ)
 	μ̃ₘ = @. μₘ[] + σₘ[]^2 * lnx
-	G = W' * (@. (ccdf(𝒩σₘ,μₘ[]-1) + exp((μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1))) * f_z₀ᵢ)
+	G = W' * (@. exp(logsumexp(logccdf(𝒩σₘ,μₘ[]-1), (μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1)) + lnf_z₀ᵢ))
 
 	# f(z₁|z₀) to be convolved with f(z₀) later using Legendre quadrature; already includes the Legendre weights
 	zdivσ = z/σ[]
@@ -136,32 +136,35 @@ function _fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ)
 		modelabsz && (neg2zdivσ = -2zdivσ)
 
 		lnx = @. logdiffcdf(𝒩, Z₀divσ+abs(zdivσ), Z₀divσ-abs(zdivσ))
-		μ̃ₘ = @. μₘ[] + σₘ[]^2 * lnx
-		lnf_Z₁condZ₀ₖ = @. log(W) + logpdf(𝒩, Z₀divσ-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ, μ̃ₘ-1) + log(hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ)
-		modelabsz && (@. lnf_Z₁condZ₀ₖ += log1pexp(Z₀divσ * neg2zdivσ))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
-		f_Z₁condZ₀ = @. exp(lnf_Z₁condZ₀ₖ)
+		μ̃ₘ = @. μₘ[] + σₘ[]^2 * lnx - 1
+		COVₘ = @. -μ̃ₘ/σₘ[]
+		loghr = @. ifelse.(COVₘ > -1000, log(hr(𝒩, COVₘ) * σₘ[] + μ̃ₘ + 1), 1 + σₘ[]/COVₘ)  # asymptotic approximation because of loss of numerical precision in exact expression
+		lnf_Z₁condZ₀ = @. log(W) + logpdf(𝒩, Z₀divσ-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logccdf(𝒩, COVₘ) + loghr
+		modelabsz && (@. lnf_Z₁condZ₀ += log1pexp(Z₀divσ * neg2zdivσ))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
 	end
 
-	f_z₀ᵢⱼ = modelabsz ? pdf(𝒩, ω-z) + pdf(𝒩, ω+z) : pdf(𝒩, ω-z)
+	lnf_z₀ᵢⱼ = modelabsz ? logpdf(𝒩, ω-z) + log1pexp(log(-2ω*z)) : logpdf(𝒩, ω-z)  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
 
 	if -z̄ ≤ z ≤ z̄
-		f_no_phack = (pR+pD) * cdf(𝒩σₘ, 1-μₘ[])  # will eventually depend on z₀
+		lnf_no_phack = log(pR+pD) + logcdf(𝒩σₘ, 1-μₘ[])  # will eventually depend on z₀
 		_lnx = logdiffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ)
 		_μ̃ₘ = μₘ[] + σₘ[]^2 * _lnx
-		f_no_sig_phack = pR < eps() ? f_no_phack : f_no_phack + pR * cdf(𝒩σₘ, _μ̃ₘ-1) * exp((μₘ[] + .5σₘ[]^2 * _lnx) * _lnx)  # probability of either no or unsuccesful p-hacking
+		lnf_no_sig_phack = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logcdf(𝒩σₘ, _μ̃ₘ-1) + (μₘ[] + .5σₘ[]^2 * _lnx) * _lnx)  # probability of either no or unsuccesful p-hacking
 	end
 
 	if -eps() ≤ z ≤ eps()
-		∫ = f_no_sig_phack * f_z₀ᵢⱼ
+		∫ = exp(lnf_no_sig_phack + lnf_z₀ᵢⱼ)
 	else
-		f_Z₁ = f_Z₁condZ₀'f_z₀ᵢ / σ[]  # constant left out of f_Z₁condZ₀ for speed
-		∫ = -z̄ ≤ z ≤ z̄ ? pD < eps() ? f_Z₁ : f_no_sig_phack * f_z₀ᵢⱼ + pD * f_Z₁ :
-																													f_z₀ᵢⱼ +      f_Z₁
+		lnf_Z₁ = logsumexp(lnf_Z₁condZ₀[k] + lnf_z₀ᵢ[k] for k ∈ 1:NLegendre) - log(σ[])  # constant left out of lnf_Z₁condZ₀ for speed
+		∫ = -z̄ ≤ z ≤ z̄ ? pD < eps() ? f_Z₁ : logsumexp(lnf_no_sig_phack + lnf_z₀ᵢⱼ, log(pD) + lnf_Z₁) :
+																				 logsumexp(lnf_z₀ᵢⱼ                   ,           lnf_Z₁)
 	end
 
 	∫, pF*G
 end
 
+# compute f(z|ω) & F(file drawer|ω)
+_fZcondΩ(args...; kwargs...) = lnfZcondΩ(args...; kwargs...) |> x->(exp(x[1]), x[2])
 
  # f(z|ω). If truncate=true (the default), returns the density conditional on publication
 fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ, truncate=true) = _fZcondΩ(z, ω; modelabsz, NLegendre, pDFR, σ, μₘ, σₘ) |> (y -> truncate ? y[1]/(1 - y[2]) : y[1])
@@ -181,16 +184,17 @@ function FZcondΩ(z, ω; modelabsz::Bool=false, NLegendre=50, pDFR, σ, μₘ, �
 
 	𝒩σₘ = Normal(0,σₘ[])
 
-	f_Z₁condZ₀   = Vector{Float64}(undef,NLegendre)
-	f_z₀ᵢ        = Vector{Float64}(undef,NLegendre)
+	lnf_z₀ᵢ        = Vector{Float64}(undef,NLegendre)
 	lnx          = Vector{Float64}(undef,NLegendre)
 	μ̃ₘ           = Vector{Float64}(undef,NLegendre)
-	lnf_Z₁condZ₀ₖ = Vector{Float64}(undef,NLegendre)
+	COVₘ         = Vector{Float64}(undef,NLegendre)
+	loghr        = Vector{Float64}(undef,NLegendre)
+	lnf_Z₁condZ₀ = Vector{Float64}(undef,NLegendre)
 
-	@. f_z₀ᵢ = pdf(𝒩, Z₀-ω)
+	@. lnf_z₀ᵢ = logpdf(𝒩, Z₀-ω)
 	@. lnx = logdiffcdf(𝒩, Z₀divσ+z̄divσ, Z₀divσ-z̄divσ)
 	@. μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
-	G = W' * (@. (ccdf(𝒩σₘ,μₘ[]-1) + exp((μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1))) * f_z₀ᵢ)
+	G = W' * (@. exp(logsumexp(logccdf(𝒩σₘ,μₘ[]-1), (μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1)) + lnf_z₀ᵢ))
 
 	# f(z₁|z₀) to be convolved with f(z₀) later using Legendre quadrature; already includes the Legendre weights
 	function myfZcondΩ(z)
@@ -200,29 +204,30 @@ function FZcondΩ(z, ω; modelabsz::Bool=false, NLegendre=50, pDFR, σ, μₘ, �
 			modelabsz && (neg2zdivσ = -2zdivσ)
 
 			@. lnx = logdiffcdf(𝒩, Z₀divσ+abs(zdivσ), Z₀divσ-abs(zdivσ))
-			@. μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
-			@. lnf_Z₁condZ₀ₖ = log(W) + logpdf(𝒩, Z₀divσ-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ, μ̃ₘ-1) + log(hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ)
-			modelabsz && (@. lnf_Z₁condZ₀ₖ += log1pexp(Z₀divσ * neg2zdivσ))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
-			@. f_Z₁condZ₀ = exp(lnf_Z₁condZ₀ₖ)
+			@. μ̃ₘ = μₘ[] + σₘ[]^2 * lnx - 1
+			@. COVₘ = -μ̃ₘ/σₘ[]
+			@. loghr = ifelse.(COVₘ > -1000, log(hr(𝒩, COVₘ) * σₘ[] + μ̃ₘ + 1), 1 + σₘ[]/COVₘ)  # asymptotic approximation because of loss of numerical precision in exact expression
+			@. lnf_Z₁condZ₀ = log(W) + logpdf(𝒩, Z₀divσ-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logccdf(𝒩, COVₘ) + loghr
+			modelabsz && (@. lnf_Z₁condZ₀ += log1pexp(Z₀divσ * neg2zdivσ))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
 		end
 
-		f_z₀ᵢⱼ = modelabsz ? pdf(𝒩, ω-z) + pdf(𝒩, ω+z) : pdf(𝒩, ω-z)
+		lnf_z₀ᵢⱼ = modelabsz ? logpdf(𝒩, ω-z) + log1pexp(log(-2ω*z)) : logpdf(𝒩, ω-z)  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
 
 		if -z̄ ≤ z ≤ z̄
-			f_no_phack = (pR+pD) * cdf(𝒩σₘ, 1-μₘ[])  # will eventually depend on z₀
+			lnf_no_phack = log(pR+pD) + logcdf(𝒩σₘ, 1-μₘ[])  # will eventually depend on z₀
 			_lnx = logdiffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ)
 			_μ̃ₘ = μₘ[] + σₘ[]^2 * _lnx
-			f_no_sig_phack = pR < eps() ? f_no_phack : f_no_phack + pR * cdf(𝒩σₘ, _μ̃ₘ-1) * exp((μₘ[] + .5σₘ[]^2 * _lnx) * _lnx)  # probability of either no or unsuccesful p-hacking
+			lnf_no_sig_phack = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logcdf(𝒩σₘ, _μ̃ₘ-1) + (μₘ[] + .5σₘ[]^2 * _lnx) * _lnx)  # probability of either no or unsuccesful p-hacking
 		end
 
 		if -eps() ≤ z ≤ eps()
-			∫ = f_no_sig_phack * f_z₀ᵢⱼ
+			∫ = exp(lnf_no_sig_phack + lnf_z₀ᵢⱼ)
 		else
-			f_Z₁ = f_Z₁condZ₀'f_z₀ᵢ / σ[]  # constant left out of f_Z₁condZ₀ for speed
-			∫ = -z̄ ≤ z ≤ z̄ ? pD < eps() ? f_Z₁ : f_no_sig_phack * f_z₀ᵢⱼ + pD * f_Z₁ :
-				                                                    f_z₀ᵢⱼ +      f_Z₁
+			lnf_Z₁ = logsumexp(lnf_Z₁condZ₀[k] + lnf_z₀ᵢ[k] for k ∈ 1:NLegendre) - log(σ[])  # constant left out of lnf_Z₁condZ₀ for speed
+			∫ = -z̄ ≤ z ≤ z̄ ? pD < eps() ? f_Z₁ : logsumexp(lnf_no_sig_phack + lnf_z₀ᵢⱼ, log(pD) + lnf_Z₁) :
+																					logsumexp(lnf_z₀ᵢⱼ                    ,           lnf_Z₁)
 		end
-		∫
+		exp(∫)
 	end
 
 	endpoints = modelabsz ? [0, z̄] : [-Inf, -z̄, z̄]  # since f(z|ω) jumps at ±z̄, do quadrature separately in each range
@@ -246,7 +251,9 @@ end
 # f(z), f(ω), f(ω|z), E[ω|z]
 # inconsistency: z should be a scalar for fΩcondZ but a vector or other iterable for EΩcondZ
 @inline fΩ(ω; p, μ, τ, ν) = p'pdf.(GenT.(μ,τ,ν), ω)
+@inline lnfΩ(ω; p, μ, τ, ν) = @inbounds logsumexp(log(p[i]) + logpdf(GenT(μ[],τ[i],ν[i]), ω) for i ∈ eachindex(p))
 @inline fZ₀condΩ(z₀,ω) = pdf(𝒩,z₀-ω)
+@inline lnfZ₀condΩ(z₀,ω) = logpdf(𝒩,z₀-ω)
 fΩcondZ(ω, z; p, μ, τ, ν, NHermite=50, NLegendre=50, kwargs...) = fZcondΩ(z, ω; NLegendre, kwargs..., truncate=false) * fΩ(ω; p, μ, τ, ν) / fZ([z]; p, μ, τ, ν, kwargs..., NLegendre, NHermite, truncate=false)[]
 EΩcondZ(z; rtol=.00001, maxevals=1e4, p, μ, τ, ν, NHermite=50, NLegendre=50, kwargs...) = [quadgk(ω -> ω * fZcondΩ(zᵢ, ω; kwargs..., NLegendre, truncate=false) * fΩ(ω; p, μ, τ, ν), -20, 20; rtol, maxevals)[1] for zᵢ∈z] ./ 
                                                                       fZ(z; p, μ, τ, ν, kwargs..., NLegendre, NHermite, truncate=false)
@@ -321,8 +328,10 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 			if	!(-eps() < z < eps())
 				for k ∈ eachindex(M.Z₀)  # for each z₀ quadrature point
 					lnx = logdiffcdf(𝒩, Z₀divσ[k]+abs(zdivσ), Z₀divσ[k]-abs(zdivσ))
-					μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
-					lnf_Z₁condZ₀[j,k] = M.lnWLegendre[k] + logpdf(𝒩, Z₀divσ[k]-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ, μ̃ₘ-1) + log(hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ)
+					μ̃ₘ = μₘ[] + σₘ[]^2 * lnx - 1
+					COVₘ = -μ̃ₘ/σₘ[]
+					loghr = COVₘ > -1000 ? log(hr(𝒩, COVₘ) * σₘ[] + μ̃ₘ + 1) : 1 + σₘ[]/COVₘ  # asymptotic approximation because of loss of numerical precision in exact expression
+					lnf_Z₁condZ₀[j,k] = M.lnWLegendre[k] + logpdf(𝒩, Z₀divσ[k]-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logccdf(𝒩, COVₘ) + loghr
 					M.modelabsz && (lnf_Z₁condZ₀[j,k] += log1pexp(Z₀divσ[k] * neg2zdivσ))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
 				end
 			end
@@ -512,7 +521,7 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 	println("\nModeling $estname data with $d mixture component(s)")
 	
 	# set starting values & parameter transformes, allowing caller to override defaults
-	from  = merge((p=fill(1/d,d), μ=[0.]     , τ=collect(LinRange(1,d,d)), ν=fill(1.,d), pDFR=fill(.25,4), σ=[1.]      , μₘ=[0.]    , σₘ=[10.]     ),  from)
+	from  = merge((p=fill(1/d,d), μ=[0.]     , τ=collect(LinRange(1,d,d)), ν=fill(1.,d), pDFR=fill(1/3,3), σ=[1.]      , μₘ=[0.]    , σₘ=[10.]     ),  from)
   xform = merge((p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , ν=bcast(log), pDFR=SimplextoRⁿ, σ=bcast(log), μₘ=identity, σₘ=bcast(log)), xform)
 
 	M = HnFmodel(z, wt; d, modelabsz, NLegendre, NHermite, penalty)
@@ -560,7 +569,7 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, NHermite=50,
 	end
 
 	one2D = first(Unicode.graphemes("₁₂₃₄"),d)
-	coefnames = vcat("p".*one2D, "μ", "τ".*one2D, "ν".*one2D, "pD", "pF", "pH", "pR", "σ", "μₘ", "σₘ")
+	coefnames = vcat("p".*one2D, "μ", "τ".*one2D, "ν".*one2D, "pD", "pF", "pR", "σ", "μₘ", "σₘ")
 	HnFresult(; estname, modelabsz, converged, coefdict, coefnames, coef=vcat(coefdict...), vcov, k=length(θ), n=size(z,1), d, ll=-Optim.minimum(res))
 end
 
@@ -581,7 +590,7 @@ function add_derived_stats!(est::HnFresult)
 													-eps() < z₁ < eps() && return 0.
 												  lnx = lnI_H(z₀,z₁)
 													μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
-													exp(logpdf(Normal(z₀,σ[]), z₁) + (μₘ[]-1 + σₘ[]^2 * .5lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1)) * (hr(𝒩σₘ, μ̃ₘ-1)*σₘ[]^2 + μ̃ₘ) *
+													exp(logpdf(Normal(z₀,σ[]), z₁) + (μₘ[]-1 + σₘ[]^2 * .5lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1)) * (hr(𝒩σₘ, 1-μ̃ₘ)*σₘ[]^2 + μ̃ₘ) *
 															fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ,ν)
                         end, [-100., -z̄], [100., z̄]; initdiv=10)[1]
 
@@ -598,15 +607,14 @@ function add_derived_stats!(est::HnFresult)
                                     -hcubature(v->((ω,z)=v; t=fΩ(ω; p, μ, τ, ν) *  fZcondΩ( z,ω;pDFR,σ,μₘ,σₘ, truncate=false); xlogy(t,t/fZ([z ]  ; p, μ, τ, ν, pDFR, σ, μₘ, σₘ, truncate=false)[] )), [-infty,-z̄    ], [infty,    z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
                                     -hcubature(v->((ω,z)=v; t=fΩ(ω; p, μ, τ, ν) *  fZcondΩ( z,ω;pDFR,σ,μₘ,σₘ, truncate=false); xlogy(t,t/fZ([z ]  ; p, μ, τ, ν, pDFR, σ, μₘ, σₘ, truncate=false)[] )), [-infty, z̄    ], [infty,infty]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
          -(pDFR[2]<eps() ? pDFR[2] : quadgk(   ω->(         t=fΩ(ω; p, μ, τ, ν) * _fZcondΩ(0.,ω;pDFR,σ,μₘ,σₘ)[2]             ; xlogy(t,t/_HnFll(_M; p, μ, τ, ν, pDFR, σ, μₘ, σₘ                )[2])), -infty, infty)[1]))
-		entropy_gain = H_Ω_Z(;p,μ,τ,ν,pDFR,σ,μₘ,σₘ) - H_Ω_Z(;p,μ,τ,ν,pDFR=[1.,0,0], σ,μₘ,σₘ)
+		entropy_gain = H_Ω_Z(;p,μ,τ,ν,pDFR,σ,μₘ,σₘ) - H_Ω_Z(;p,μ,τ,ν,pDFR=[1.,0,0], σ,μₘ=[-100.],σₘ=[1.])
 
-		H_z₀(τ_multiplier) = (-hcubature(v -> ((ω,_)=v; xlogx(fΩ(ω; p, μ, τ=τ*τ_multiplier, ν) * fZ₀condΩ(v...))), [-infty,-infty], [infty,   -z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
-						              -hcubature(v -> ((ω,_)=v; xlogx(fΩ(ω; p, μ, τ=τ*τ_multiplier, ν) * fZ₀condΩ(v...))), [-infty,-z̄    ], [infty,    z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
-						              -hcubature(v -> ((ω,_)=v; xlogx(fΩ(ω; p, μ, τ=τ*τ_multiplier, ν) * fZ₀condΩ(v...))), [-infty, z̄    ], [infty,infty]; initdiv=10, rtol=1e-3, atol=1e-3)[1])
+		H_z₀(τ_multiplier) = (-hcubature(v -> ((ω,_)=v; xexpx(lnfΩ(ω; p, μ, τ=τ*τ_multiplier, ν) + lnfZ₀condΩ(v...))), [-infty,-infty], [infty,   -z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
+						              -hcubature(v -> ((ω,_)=v; xexpx(lnfΩ(ω; p, μ, τ=τ*τ_multiplier, ν) + lnfZ₀condΩ(v...))), [-infty,-z̄    ], [infty,    z̄]; initdiv=10, rtol=1e-3, atol=1e-3)[1]
+						              -hcubature(v -> ((ω,_)=v; xexpx(lnfΩ(ω; p, μ, τ=τ*τ_multiplier, ν) + lnfZ₀condΩ(v...))), [-infty, z̄    ], [infty,infty]; initdiv=10, rtol=1e-3, atol=1e-3)[1])
 
 		equiv_sample_reduction = 1 - find_zero(τ_multiplier -> H_z₀(τ_multiplier) - (H_z₀(1) - entropy_gain), (0.01, 1.5); rtol=1e-3, atol=1e-3)
 
-		 Sh₂₄ / (Sh₂₄ + S₂₄), mean(@. sim.z[2<abs(sim.z)<4]!=sim.z₀[2<abs(sim.z)<4])
 		[
 			pF*F_insig                              # fraction of all studies file-drawered
 			pF*F_insig / I₀                         # fraction of initially insignificant studies file-drawered
@@ -625,9 +633,9 @@ function add_derived_stats!(est::HnFresult)
 	# [ForwardDiff.derivative(σ->derived_stats(;p=est.coefdict.p,μ=est.coefdict.μ,τ=est.coefdict.τ,ν=est.coefdict.ν,pDFR=est.coefdict.pDFR,σ=[σ],m=est.coefdict.m), .5)[9] for est ∈ (Setal, GMpolisci, GMsoc, SW, BCH, ABetal, vZSS, V)]
 
 	d = length(est.coefdict.p)
-	est.coef = est.coef[1:3d+8]  # remove old derived stats if any; for debugging, allows this function to be called repeatedly
-	est.vcov = est.vcov[1:3d+8, 1:3d+8]
-	est.coefnames = est.coefnames[1:3d+8]
+	est.coef = est.coef[1:3d+7]  # remove old derived stats if any; for debugging, allows this function to be called repeatedly
+	est.vcov = est.vcov[1:3d+7, 1:3d+7]
+	est.coefnames = est.coefnames[1:3d+7]
 
 	extractor = zip(keys(est.coefdict), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), est.coefdict, init=0))
 	coefdict_maker(v) = NamedTuple(p=>v[e] for (p,e) ∈ extractor)
@@ -665,7 +673,7 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 
   pplottrue                     = map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν),  z)), _zplot)
   est.modelabsz && (pplottrue .+= map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν), -z)), _zplot))
-	# pplottrue ./= 1 - est.coef[findfirst(==("overall_file_drawer_frac"), est.coefnames)]
+	pplottrue ./= 1 - est.coef[findfirst(==("overall_file_drawer_frac"), est.coefnames)]
 
 	pplotinitial = fZ(_zplot; kwargsω..., kwargsz0..., modelabsz=est.modelabsz, NLegendre, NHermite)
 	pplotfit     = fZ(_zplot; kwargsω..., kwargsz ..., modelabsz=est.modelabsz, NLegendre, NHermite)
@@ -691,7 +699,7 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 	
 	# frequentist equal-tailed CI's as fn of z--Andrews & Kasy (2014), Figure 2
 	CIs0 = Cquant.([.025 .5 .975], zplot; rtol=.0001, kwargsz0..., NLegendre)
-	CIs  = Cquant.([.025 .5 .975], zplot; rtol=.0001, kwargsz..., NLegendre )
+	CIs  = Cquant.([.025 .5 .975], zplot; rtol=.0001, kwargsz ..., NLegendre )
 	Axis(f[1,3], xlabel="Reported z", ylabel="Point estimate and 95% CI for true z", xticks=-5:5, yticks=-6:6)
 	lines!(zplot, CIs0[:,1], color=Makie.wong_colors()[1], label="No adjustment")
 	lines!(zplot, CIs0[:,2], color=Makie.wong_colors()[1], linestyle=:dash)
@@ -767,7 +775,7 @@ modelabsz = false
 pDFR = [pD, pF, pR]
 kwargs = (p=p, μ=μ, τ=τ, ν=ν, pDFR=pDFR, σ=σ, μₘ=μₘ, σₘ=σₘ, modelabsz=modelabsz)
 
-n = 10_000_000
+n = 100_000
 Random.seed!(1232)
 sim = HnFDGP(n; kwargs..., truncate=false)
 
@@ -880,7 +888,7 @@ f |> display
 							estim_decoration = (coef,p)->coef,  # no stars
 							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
 							print_estimator_section = false,
-							keep = ["p₁", "p₂", "p₃", "p₄", "μ", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pH", "pD", "pR", "σ", "μₘ", "σₘ", "frac_insig_file_drawered", "frac_insig_pubbed_as_is", "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig","H(Ω|Z)-H(Ω|Z₀)", "equiv_sample_reduction"],
+							keep = ["p₁", "p₂", "p₃", "p₄", "μ", "τ₁", "τ₂", "τ₃", "τ₄", "ν₁", "ν₂", "ν₃", "ν₄", "pF", "pD", "pR", "σ", "μₘ", "σₘ", "frac_insig_file_drawered", "frac_insig_pubbed_as_is", "p_hacked_frac_of_pubbed_insig", "p_hacked_frac_of_sig", "p_hacked_frac_of_marg_sig","H(Ω|Z)-H(Ω|Z₀)", "equiv_sample_reduction"],
 							estimformat = "%0.3g",
 							statisticformat = "%0.3g",
 							number_regressions = false,
