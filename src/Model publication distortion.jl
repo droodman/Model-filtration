@@ -12,7 +12,7 @@ const 𝒩 = Normal()
 const z̄ = quantile(𝒩, .975)  # 1.96
 
 @inline diffcdf(N,b,a) = cdf(N,b) - cdf(N,a)
-@inline hr(d,x) = exp(logpdf(d,x) - logccdf(d,x))  # standard normal hazard ratio/inverse Mills ratio
+@inline hr(d::Normal,x) = (t=(x-Distributions.location(d))/Distributions.scale(d)) > 1e4 ? (t+1/t)/Distributions.scale(d) : exp(logpdf(d,x) - logccdf(d,x))  # standard normal hazard ratio/inverse Mills ratio
 @inline sqrt0(x::T) where {T} = x<0 ? zero(T) : sqrt(x)
 
 
@@ -306,7 +306,6 @@ import Base.==
 # Compute observation-level likelihood (not log likelihood), file-drawer mass, and expected fraction of initially insignificant results
 function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::AbstractVector{T}, ν::AbstractVector{T}, pDFR::AbstractVector, σ::Vector, μₘ::Vector, σₘ::Vector) where {T}
   pD, pF, pR = pDFR
-	𝒩σₘ = Normal(0,σₘ[])
 
 	is = findall(>(1e-6), p)  # ~nonzero mixture components
 	_d = length(is)
@@ -318,28 +317,33 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 	logf_no_sig_phack = get!( M.logf_no_sig_phackdict,  T    , Vector{T}(undef, M.N))::Vector{T}
 
 	@. Z₀divσ = M.Z₀ / σ[]; z̄divσ = z̄ / σ[]
-	lnf_no_phack = log(pR+pD) + logcdf(𝒩σₘ, 1-μₘ[])  # will eventually depend on z₀
 
 	# f(z₁|z₀) to be convolved with f(z₀) later using Legendre quadrature; already includes the Legendre weights
-	Threads.@threads for j ∈ eachindex(M.z)  # for each z value/interpolation point
+	Threads.@threads for j ∈ eachindex(M.z)
 		@inbounds begin
 			z = M.z[j]; zdivσ = z/σ[]
 			M.modelabsz && (neg2zdivσ = -2zdivσ)
 			if	!(-eps() < z < eps())
 				for k ∈ eachindex(M.Z₀)  # for each z₀ quadrature point
 					lnx = logdiffcdf(𝒩, Z₀divσ[k]+abs(zdivσ), Z₀divσ[k]-abs(zdivσ))
-					μ̃ₘ = μₘ[] + σₘ[]^2 * lnx - 1
-					COVₘ = -μ̃ₘ/σₘ[]
-					loghr = COVₘ > -1000 ? log(hr(𝒩, COVₘ) * σₘ[] + μ̃ₘ + 1) : 1 + σₘ[]/COVₘ  # asymptotic approximation because of loss of numerical precision in exact expression
-					lnf_Z₁condZ₀[j,k] = M.lnWLegendre[k] + logpdf(𝒩, Z₀divσ[k]-zdivσ) + (μₘ[]-1 + .5σₘ[]^2 * lnx) * lnx + logccdf(𝒩, COVₘ) + loghr
+					S_H = ccdf(𝒩, z̄divσ+Z₀divσ[k]) + ccdf(𝒩, z̄divσ-Z₀divσ[k])  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
+					_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
+					μ̃ₘ = _μₘ + _σₘ^2 * lnx - 1
+					COVₘ = -μ̃ₘ/_σₘ
+					hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1<0 && println("k=$k; Z₀=$(M.Z₀[k]); σ=$(σ[].value); S_H=$(S_H.value); COVₘ=$(COVₘ.value); _σₘ=$(_σₘ.value); μ̃ₘ=$(μ̃ₘ.value) hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1=$((hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1).value)")
+					loghr = COVₘ > -1000 ? log(hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1) : 1 + _σₘ/COVₘ  # asymptotic approximation because of loss of numerical precision in exact expression
+					lnf_Z₁condZ₀[j,k] = M.lnWLegendre[k] + logpdf(𝒩, Z₀divσ[k]-zdivσ) + (_μₘ-1 + .5_σₘ^2 * lnx) * lnx + logccdf(𝒩, COVₘ) + loghr
 					M.modelabsz && (lnf_Z₁condZ₀[j,k] += log1pexp(Z₀divσ[k] * neg2zdivσ))  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
 				end
 			end
 
 			if M.insig[j]
 				lnx = logdiffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ)
-				μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
-				logf_no_sig_phack[j] = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logcdf(𝒩σₘ, μ̃ₘ-1) + (μₘ[] + .5σₘ[]^2 * lnx) * lnx)  # probability of either no or unsuccesful p-hacking
+				S_H = ccdf(𝒩, z̄divσ+zdivσ) + ccdf(𝒩, z̄divσ-zdivσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
+				_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
+				μ̃ₘ = _μₘ + _σₘ^2 * lnx
+				lnf_no_phack = log(pR+pD) + logcdf(𝒩, (1-_μₘ)/_σₘ)
+				logf_no_sig_phack[j] = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logcdf(𝒩, (μ̃ₘ-1)/_σₘ) + (_μₘ + .5*_σₘ^2 * lnx) * lnx)  # probability of either no or unsuccesful p-hacking
 			end
 		end
 	end
@@ -367,8 +371,10 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 			I₀ᵢ += exp(M.lnWLegendre[k] + lnf_z₀ᵢₖ)
 
 			lnx = logdiffcdf(𝒩, Z₀divσ[k]+z̄divσ, Z₀divσ[k]-z̄divσ)
-			μ̃ₘ = μₘ[] + σₘ[]^2 * lnx
-			Gᵢ += M.WLegendre[k] * (ccdf(𝒩σₘ,μₘ[]-1) + exp((μₘ[] + .5σₘ[]^2 * lnx) * lnx + logcdf(𝒩σₘ,μ̃ₘ-1))) * exp(lnf_z₀ᵢₖ)
+			S_H = ccdf(𝒩, z̄divσ+Z₀divσ[k]) + ccdf(𝒩, z̄divσ-Z₀divσ[k])  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
+			_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
+			μ̃ₘ = _μₘ + _σₘ^2 * lnx
+			Gᵢ += M.WLegendre[k] * (ccdf(𝒩,(_μₘ-1)/_σₘ) + exp((_μₘ + .5_σₘ^2 * lnx) * lnx + logcdf(𝒩,(μ̃ₘ-1)/_σₘ))) * exp(lnf_z₀ᵢₖ)
 		end
 		G  += exp(Cᵢ) * Gᵢ
 		I₀ += exp(Cᵢ) * I₀ᵢ
@@ -390,6 +396,8 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 	end
   logsumexp!(logf_no_sig_phack, ∫), pF * G, I₀  # sum across mixture components, into `logf_no_sig_phack` because it's the right size and already allocated
 end
+
+k=1; Z₀=-1.957742178030363; σ=0.0162833316189543; S_H=0.44573408741075315; COVₘ=75834.73275413687; _σₘ=56.270696462414925; μ̃ₘ=-4.267273228116391e6
 
 # returns negative of penalized log likelihood
 function HnFll(M::HnFmodel; pDFR, kwargs...)
@@ -419,7 +427,8 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 			if abs(z₀ᵢ) > z̄  # if initial result significant, publish as is
 				z[i] = z₀ᵢ
 			else
-				m[i] = mᵢ = floor(Int, rand(Normal(μₘ[], σₘ[])))  # number of measurements to be taken if p-hacking
+				S_H = 1 - diffcdf(Normal(z₀ᵢ, σ[]),z̄,-z̄)  # Pr[p-hack success per try | z₀]
+				m[i] = mᵢ = floor(Int, rand(S_H * Normal(μₘ[], σₘ[])))  # number of measurements to be taken if p-hacking
 				if mᵢ<1	 # no p-hacking
 					z₁[i] = z₁ᵢ = z₀ᵢ
 				else
@@ -777,7 +786,7 @@ kwargs = (p=p, μ=μ, τ=τ, ν=ν, pDFR=pDFR, σ=σ, μₘ=μₘ, σₘ=σₘ, 
 
 n = 100_000
 Random.seed!(1232)
-sim = HnFDGP(n; kwargs..., truncate=false)
+sim = HnFDGP(n; kwargs..., truncate=true)
 
 f = Figure()
 Axis(f[1,1], limits=(modelabsz ? 0 : -10, 10, nothing,nothing))
@@ -786,8 +795,7 @@ zplot = (modelabsz ? 0 : -10):.01:10
 lines!(zplot, fZ(zplot; NHermite=50, kwargs...), color=:orange, label="True model")
 f|>display
 
-penalty(; τ::Vector{T}, σ::Vector{T}, kwargs...) where {T} = logpdf(Normal(0,5), log(σ[])) + sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) 
-res = HnFfit(sim.z; d, modelabsz, penalty, estname="simulated", extended_trace=false)  # penalized maximum likelihood
+res = HnFfit(sim.z; d, modelabsz, estname="simulated", from=(p=p, μ=μ, τ=τ, ν=ν, pDFR=pDFR, σ=σ, μₘ=μₘ, σₘ=σₘ), extended_trace=false)  # penalized maximum likelihood
 print(res.coefdict)
 lines!(zplot, fZ(zplot; modelabsz, res.coefdict...)[:,1], color=:green, label="Fitted model")
 
