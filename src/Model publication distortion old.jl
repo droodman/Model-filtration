@@ -153,12 +153,8 @@ function lnfZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ
 
 			# component asymmetric in z₀
 			o.lnf_Z₁condZ₀[k] = logpdf(𝒩, o.Z₀divσ[k]-zdivσ) + lnf_Z₁condZ₀ₖ
-			if modelabsz
-				o.lnf_Z₁condZ₀[k] += log1pexp(o.Z₀divσ[k] * neg2zdivσ)  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
-				o.lnf_Z₁condZ₀[end+1-k] = o.lnf_Z₁condZ₀[k]
-			else
-				o.lnf_Z₁condZ₀[end+1-k] = logpdf(𝒩, -o.Z₀divσ[k]-zdivσ) + lnf_Z₁condZ₀ₖ
-			end
+			o.lnf_Z₁condZ₀[end+1-k] = modelabsz ? (o.lnf_Z₁condZ₀[k] += log1pexp(o.Z₀divσ[k] * neg2zdivσ)) :  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
+													logpdf(𝒩, -o.Z₀divσ[k]-zdivσ) + lnf_Z₁condZ₀ₖ
 		end
 	end
 
@@ -170,10 +166,9 @@ function lnfZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ
 		lnI_H = logdiffcdf(𝒩, zdivσ+o.z̄divσ, zdivσ-o.z̄divσ)
 		S_H = ccdf(𝒩, o.z̄divσ+zdivσ) + ccdf(𝒩, o.z̄divσ-zdivσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
 		_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-		μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
-		COVₘ = -μ̃ₘ/_σₘ
-		lnf_no_phack = log(pR+pD) + logcdf(𝒩, (1-_μₘ)/_σₘ)
-		lnf_no_sig_phack = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logccdf(𝒩, COVₘ) + (_μₘ + .5_σₘ^2 * lnI_H) * lnI_H)  # probability of either no or unsuccesful p-hacking
+		μ̃ₘ = _μₘ + _σₘ^2 * lnI_H
+		lnf_no_phack = log(pR+pD) + logcdf(Normal(0,_σₘ), 1-_μₘ)
+		lnf_no_sig_phack = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logcdf(Normal(0,_σₘ), μ̃ₘ-1) + (_μₘ + .5_σₘ^2 * lnI_H) * lnI_H)  # probability of either no or unsuccesful p-hacking
 	end
 
 	if -eps() ≤ z ≤ eps()
@@ -195,12 +190,11 @@ fZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ, truncate=
 
 
 # cdf of z|ω
-function FZcondΩ(z, ω; rtol=.001, order=13, pDFR, modelabsz=false, NLegendre=50, kwargs...)
-	# println("Entering FZcondΩz=$z ω=$ω rtol=$rtol order=$order pDFR=$pDFR kwargs=$kwargs modelabsz=$modelabsz NLegendre=$NLegendre")
-	o = lnfZcondΩ_prep(ω; NLegendre, kwargs...)
+function FZcondΩ(z, ω; rtol=.001, order=13, pDFR, σ, μₘ, σₘ, modelabsz=false, NLegendre=50)
+	o = lnfZcondΩ_prep(ω; NLegendre, σ, μₘ, σₘ)
 	endpoints = modelabsz ? [0, z̄] : [-Inf, -z̄, z̄]  # since f(z|ω) jumps at ±z̄, do quadrature separately in each range
 	endpoints = [endpoints[findall(<(z), endpoints)]; z]
-	quadgk(_z->exp(lnfZcondΩ(_z,ω; NLegendre, o, pDFR, kwargs...)[1]), endpoints...; rtol, order)[1] / (1 - pDFR[2] * o.F_insig)
+	quadgk(_z->exp(lnfZcondΩ(_z,ω; pDFR, σ, μₘ, σₘ, o)[1]), endpoints...; rtol, order)[1] / (1 - pDFR[2] * o.F_insig)
 end
 
 quantFcondΩ(q, ω; kwargs...) = find_zero(z -> q - FZcondΩ(z, ω; kwargs...), (-20,20), Roots.ITP())  # ITP algorithm works well
@@ -311,10 +305,9 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 				lnI_H = logdiffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ)
 				S_H = ccdf(𝒩, z̄divσ+zdivσ) + ccdf(𝒩, z̄divσ-zdivσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
 				_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-				μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
-				COVₘ = -μ̃ₘ/_σₘ
+				μ̃ₘ = _μₘ + _σₘ^2 * lnI_H
 				lnf_no_phack = log(pR+pD) + logcdf(𝒩, (1-_μₘ)/_σₘ)
-				logf_no_sig_phack[j] = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logccdf(𝒩, COVₘ) + (_μₘ + .5*_σₘ^2 * lnI_H) * lnI_H)  # probability of either no or unsuccesful p-hacking
+				logf_no_sig_phack[j] = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logcdf(𝒩, (μ̃ₘ-1)/_σₘ) + (_μₘ + .5*_σₘ^2 * lnI_H) * lnI_H)  # probability of either no or unsuccesful p-hacking
 			end
 		end
 	end
@@ -344,9 +337,8 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 			lnI_H = logdiffcdf(𝒩, Z₀divσ[k]+z̄divσ, Z₀divσ[k]-z̄divσ)
 			S_H = ccdf(𝒩, z̄divσ+Z₀divσ[k]) + ccdf(𝒩, z̄divσ-Z₀divσ[k])  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
 			_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-			μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
-			COVₘ = -μ̃ₘ/_σₘ
-			f_insigᵢ += M.WLegendre[k] * (ccdf(𝒩,(_μₘ-1)/_σₘ) + exp((_μₘ + .5_σₘ^2 * lnI_H) * lnI_H + logccdf(𝒩,COVₘ))) * exp(lnf_z₀ᵢₖ)
+			μ̃ₘ = _μₘ + _σₘ^2 * lnI_H
+			f_insigᵢ += M.WLegendre[k] * (ccdf(𝒩,(_μₘ-1)/_σₘ) + exp((_μₘ + .5_σₘ^2 * lnI_H) * lnI_H + logcdf(𝒩,(μ̃ₘ-1)/_σₘ))) * exp(lnf_z₀ᵢₖ)
 		end
 		f_insig += exp(Cᵢ) * f_insigᵢ
 		I₀ += exp(Cᵢ) * I₀ᵢ
@@ -375,6 +367,13 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 	end
   logsumexp!(logf_no_sig_phack, ∫), pF * f_insig, I₀  # sum across mixture components, into `logf_no_sig_phack` because it's the right size and already allocated
 end
+
+# d=2
+# est=HnFfit(sim.z; d=3, penalty)
+# M = HnFmodel(sim.z; d)
+# T = Float64
+# @time HnFll(M; p=p, μ=μ, τ=τ, ν=ν, pDFR=pDFR, σ=σ, μₘ=μₘ, σₘ=σₘ)
+
 
 # returns negative of penalized log likelihood
 function HnFll(M::HnFmodel; pDFR, kwargs...)
@@ -663,7 +662,7 @@ function HnFestimate(df::DataFrame, z::Symbol, wt=nothing; dmax=2, estname="", N
 	add_derived_stats!(est)
 end
 
-function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="", noAKplots::Bool=true)
+function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=250, NHermite=50, zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="")
 	t = est.coefdict
 	kwargsω = (p=t.p, μ=t.μ, τ=t.τ, ν=t.ν)
 	kwargsz = (pDFR=t.pDFR, σ=t.σ, μₘ=t.μₘ, σₘ=t.σₘ)
@@ -705,8 +704,8 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 	axislegend(position=:lt, framevisible = false)
 	
 	# frequentist equal-tailed CI's as fn of z--Andrews & Kasy (2014), Figure 2
-	CIs0 = Cquant.([.025 .5 .975], zplot; rtol=.0001, kwargsz0..., NLegendre)
-	CIs  = Cquant.([.025 .5 .975], zplot; rtol=.0001, kwargsz ..., NLegendre)
+	CIs0 = Cquant.([.025 .5 .975], zplot; rtol=.001, kwargsz0..., NLegendre)
+	CIs  = Cquant.([.025 .5 .975], zplot; rtol=.001, kwargsz ..., NLegendre)
 	Axis(f[1,3], xlabel="Reported z", ylabel="Point estimate and 95% CI for true z", xticks=-5:5, yticks=-6:6)
 	lines!(zplot, CIs0[:,1], color=Makie.wong_colors()[1], label="No adjustment")
 	lines!(zplot, CIs0[:,2], color=Makie.wong_colors()[1], linestyle=:dash)
@@ -714,14 +713,14 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 	lines!(zplot, CIs[:,1], color=Makie.wong_colors()[6], label="Adjusting for research distortion")
 	lines!(zplot, CIs[:,2], color=Makie.wong_colors()[6], linestyle=:dash)
 	lines!(zplot, CIs[:,3], color=Makie.wong_colors()[6])
-
-	s,e = extrema(findall(x->abs(x)<.1, CIs[:,1]))
-	lb = linear_interpolation(CIs[s:e,1],zplot[s:e])(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
-	s,e = extrema(findall(x->abs(x)<.1, CIs[:,3]))
-	ub = linear_interpolation(CIs[s:e,3],zplot[s:e])(0.)
-	scatter!([lb;ub],[0.;0], color=Makie.wong_colors()[6])
-	text!(lb, 0., text=format("{:03.2f}", lb), align=(:right, :bottom), fontsize=18)
-	text!(ub, 0., text=format("{:03.2f}", ub), align=(:left, :top), fontsize=18)
+	try
+		lb = linear_interpolation(CIs[:,1],zplot)(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
+		ub = linear_interpolation(CIs[:,3],zplot)(0.)
+		scatter!([lb;ub],[0.;0], color=Makie.wong_colors()[6])
+		text!(lb, 0., text=format("{:03.2f}", lb), align=(:right, :bottom), fontsize=18)
+		text!(ub, 0., text=format("{:03.2f}", ub), align=(:left, :top), fontsize=18)
+	catch e
+	end
 	axislegend(position=:lt, framevisible = false)
 
 	# Posterior mean of ω as fn of Z
@@ -749,20 +748,17 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 	f |> display
 	save("output/$(est.estname) all.png", f)
 
-	# Plots modeled on Andrews & Kasy (2019)
-	if !noAKplots
-		fAK = Figure(size=(1000,500))
-		fAK[0, 1:2] = Label(fAK, title)
-		Axis(fAK[1,1], xlabel="True z", ylabel="Median bias in reported z")
-		lines!(ωplot, zeros(size(ωplot)))
-		lines!(ωplot, quantFcondΩ.(.5, ωplot; kwargsz..., NLegendre) .- ωplot)
+	fAK = Figure(size=(1000,500))
+	fAK[0, 1:2] = Label(fAK, title)
+	Axis(fAK[1,1], xlabel="True z", ylabel="Median bias in reported z")
+	lines!(ωplot, zeros(size(ωplot)))
+	lines!(ωplot, quantFcondΩ.(.5, ωplot; kwargsz..., NLegendre) .- ωplot)
 
-		Axis(fAK[1,2], xlabel="True z", ylabel="Coverage of reported 95% CI")
-		lines!(ωplot, fill(.95, size(ωplot)...))
-		lines!(ωplot, @. FZcondΩ(ωplot+z̄, ωplot; kwargsz..., NLegendre)-FZcondΩ(ωplot-z̄, ωplot; kwargsz..., NLegendre))
-		fAK |> display
-		save("output/$(est.estname) A&K Fig1.png", fAK)
-	end
+	Axis(fAK[1,2], xlabel="True z", ylabel="Coverage of reported 95% CI")
+	lines!(ωplot, fill(.95, size(ωplot)...))
+	lines!(ωplot, @. FZcondΩ(ωplot+z̄, ωplot; kwargsz..., NLegendre)-FZcondΩ(ωplot-z̄, ωplot; kwargsz..., NLegendre))
+	fAK |> display
+	save("output/$(est.estname) A&K Fig1.png", fAK)
 end
 
 
