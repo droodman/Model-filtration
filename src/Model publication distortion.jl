@@ -6,7 +6,7 @@ Pkg.activate(".")  # activate this project's environment
 Pkg.instantiate()  # make sure all packages installed
 
 using Random, IrrationalConstants, Format, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature, Optim, LogExpFunctions, CSV, DataFrames, DataFramesMeta, ForwardDiff, LinearAlgebra, Roots, QuadGK, Statistics, 
-       InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions, ThreadsX, HCubature
+       InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions, ThreadsX, HCubature, KissSmoothing
 
 const 𝒩 = Normal()
 const z̄ = quantile(𝒩, .975)  # 1.96
@@ -116,16 +116,16 @@ function lnfZcondΩ_prep(ω; NLegendre, σ::Vector{T}, μₘ, σₘ) where {T}
 	Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
 	Z₀ = Z₀*z̄; W = W*z̄
 
-	lnf_z₀ᵢ      = @. logpdf(𝒩, Z₀-ω)
-	z̄divσ        = z̄/σ[]
-	Z₀divσ       = Z₀/σ[]
-	lnI_H        = @. logdiffcdf(𝒩, Z₀divσ+z̄divσ, Z₀divσ-z̄divσ)
-	S_H          = @. ccdf(𝒩, z̄divσ+Z₀divσ) + ccdf(𝒩, z̄divσ-Z₀divσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
-	_μₘ          = @. S_H * μₘ[]
-	_σₘ          = @. S_H * σₘ[]
-	μ̃ₘ           = @. _μₘ + _σₘ^2 * lnI_H
-	F_insig      = W' * (@. exp(logsumexp(logccdf(Normal(0,_σₘ),_μₘ-1), 
-														            (_μₘ + .5_σₘ^2 * lnI_H) * lnI_H + logcdf(Normal(0,_σₘ),μ̃ₘ-1)) + lnf_z₀ᵢ))
+	lnf_z₀ᵢ = @. logpdf(𝒩, Z₀-ω)
+	z̄divσ   = z̄/σ[]
+	Z₀divσ  = Z₀/σ[]
+	lnI_H   = @. logdiffcdf(𝒩, Z₀divσ+z̄divσ, Z₀divσ-z̄divσ)
+	S_H     = @. ccdf(𝒩, z̄divσ+Z₀divσ) + ccdf(𝒩, z̄divσ-Z₀divσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
+	_μₘ     = @. S_H * μₘ[]
+	_σₘ     = @. S_H * σₘ[]
+	μ̃ₘ      = @. _μₘ + _σₘ^2 * lnI_H
+	F_insig = W' * (@. exp(logsumexp(logccdf(Normal(0,_σₘ),_μₘ-1), 
+														       (_μₘ + .5_σₘ^2 * lnI_H) * lnI_H + logcdf(Normal(0,_σₘ),μ̃ₘ-1)) + lnf_z₀ᵢ))
 
 	(Z₀ = Z₀, W = W,
 		z̄divσ  = z̄divσ, Z₀divσ = Z₀divσ,
@@ -157,7 +157,7 @@ function lnfZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ
 				o.lnf_Z₁condZ₀[k] += log1pexp(o.Z₀divσ[k] * neg2zdivσ)  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
 				o.lnf_Z₁condZ₀[end+1-k] = o.lnf_Z₁condZ₀[k]
 			else
-				o.lnf_Z₁condZ₀[end+1-k] = logpdf(𝒩, -o.Z₀divσ[k]-zdivσ) + lnf_Z₁condZ₀ₖ
+				o.lnf_Z₁condZ₀[end+1-k] = logpdf(𝒩, o.Z₀divσ[k]+zdivσ) + lnf_Z₁condZ₀ₖ  # compute for -z₀ as well as z₀
 			end
 		end
 	end
@@ -276,6 +276,7 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 	is = findall(>(1e-6), p)  # ~nonzero mixture components
 	_d = length(is)
 
+	# fetch previoiusly allocated objects of needed element type, or allocate if needed
 	∫                 = get!(                 M.∫dict, (T,_d), Matrix{T}(undef,M.N,_d))::Matrix{T}
 	lnf_Z₁condZ₀      = get!(        M.f_Z₁condZ₀dict,  T    , Matrix{T}(undef,M.N,M.NLegendre))::Matrix{T}
 	lnf_z₀ᵢ           = get!(         M.lnf_z₀_ikdict,  T    , Vector{T}(undef, M.NLegendre))::Vector{T}
@@ -301,9 +302,13 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 					lnf_Z₁condZ₀ⱼₖ = M.lnWLegendre[k] + (_μₘ-1 + .5_σₘ^2 * lnI_H) * lnI_H + logccdf(𝒩, COVₘ) + loghr
 
 					# sole component asymmetric in z₀ (if !modelabsz); NaN here means f(z₁|z₀)=0 within achieved numerical precision
-					lnf_Z₁condZ₀[j,k] = logpdf(𝒩,  Z₀divσ[k]-zdivσ) + lnf_Z₁condZ₀ⱼₖ
-					lnf_Z₁condZ₀[j,end+1-k] = M.modelabsz ? (lnf_Z₁condZ₀[j,k] += log1pexp(Z₀divσ[k] * neg2zdivσ)) :  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
-															logpdf(𝒩, -Z₀divσ[k]-zdivσ) + lnf_Z₁condZ₀ⱼₖ
+					lnf_Z₁condZ₀[j,k] = logpdf(𝒩, Z₀divσ[k]-zdivσ) + lnf_Z₁condZ₀ⱼₖ
+					if M.modelabsz
+						lnf_Z₁condZ₀[j,k] += log1pexp(Z₀divσ[k] * neg2zdivσ)  # log [ϕ(a-b) + ϕ(a+b)] = log[ϕ(a-b)] + log[1+exp(-2ab)]
+						lnf_Z₁condZ₀[j,end+1-k] = lnf_Z₁condZ₀[j,k]  # same for ±z₀
+					else
+						lnf_Z₁condZ₀[j,end+1-k] = logpdf(𝒩, Z₀divσ[k]+zdivσ) + lnf_Z₁condZ₀ⱼₖ  # compute for -z₀ as well as z₀
+					end
 				end
 			end
  
@@ -651,11 +656,9 @@ function add_derived_stats!(est::HnFresult)
 end
 
 function HnFestimate(df::DataFrame, z::Symbol, wt=nothing; dmax=2, estname="", NLegendre=250, NHermite=50, kwargs...)
-	if isnothing(wt)  # for speed, collapse duplicates in data set
-		gdf = @combine(@groupby(df, z), :z=first($z), :wt=length($z))
-	else
-		gdf = @combine(@groupby(df, z), :z=first($z), :wt=sum($wt)  )
-	end
+	# for speed, collapse duplicates in data set
+	gdf = isnothing(wt) ? @combine(@groupby(df, z), :z=first($z), :wt=length($z)) :
+												@combine(@groupby(df, z), :z=first($z), :wt=sum(  $wt))
 
 	results = [HnFfit(gdf.z, gdf.wt; d, estname="$estname$d", NLegendre, NHermite, kwargs...) for d ∈ 1:dmax]
 	est = results[argmin(isnan(t.BIC) ? Inf : t.BIC for t ∈ results)]
@@ -716,9 +719,9 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 	lines!(zplot, CIs[:,3], color=Makie.wong_colors()[6])
 
 	s,e = extrema(findall(x->abs(x)<.1, CIs[:,1]))
-	lb = linear_interpolation(CIs[s:e,1],zplot[s:e])(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
+	lb = linear_interpolation(denoise(CIs[:,1], factor=.1)[1][s:e], zplot[s:e])(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
 	s,e = extrema(findall(x->abs(x)<.1, CIs[:,3]))
-	ub = linear_interpolation(CIs[s:e,3],zplot[s:e])(0.)
+	ub = linear_interpolation(denoise(CIs[:,3], factor=.1)[1][s:e], zplot[s:e])(0.)
 	scatter!([lb;ub],[0.;0], color=Makie.wong_colors()[6])
 	text!(lb, 0., text=format("{:03.2f}", lb), align=(:right, :bottom), fontsize=18)
 	text!(ub, 0., text=format("{:03.2f}", ub), align=(:left, :top), fontsize=18)

@@ -2,7 +2,7 @@
 
 julia_version = "1.12.4"
 manifest_format = "2.0"
-project_hash = "193d167f6fbc3dcd437d147a68333993e3bd6c07"
+project_hash = "010c7347ae34fab469a9e169fd2bb419d1ce889b"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "f7304359109c768cf32dc5fa2d371565bb63b68a"
@@ -1018,6 +1018,12 @@ deps = ["Distributions", "DocStringExtensions", "FFTW", "Interpolations", "Stats
 git-tree-sha1 = "ba51324b894edaf1df3ab16e2cc6bc3280a2f1a7"
 uuid = "5ab0869b-81aa-558d-bb23-cbf5423bbe9b"
 version = "0.6.10"
+
+[[deps.KissSmoothing]]
+deps = ["FFTW", "LinearAlgebra", "SparseArrays", "Statistics"]
+git-tree-sha1 = "6d4c314981c5f1df153c23b69dfa295c5286e247"
+uuid = "23b0397c-cd08-4270-956a-157331f0528f"
+version = "1.0.8"
 
 [[deps.LAME_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
