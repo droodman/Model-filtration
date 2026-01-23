@@ -960,7 +960,7 @@ f |> display
 	@. @subset!(df, :source=="Abstract")
   BWAbstr = HnFestimate(df, :z; penalty, estname="BWAbstr")
 	HnFplot(df.z, BWAbstr; title="Barnett and Wren (2019) data, abstracts only")
-
+β̂
 	table = regtable(Setal, GMpolisci, GMsoc, SW, BCH, ABetal, vZSS, V, BW, BWAbstr;
 							estim_decoration = (coef,p)->coef,  # no stars
 							regression_statistics = [Nobs #=, Converged, LogLikelihood, BIC=#],
