@@ -139,17 +139,48 @@ end
 function lnfZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ, o=lnfZcondΩ_prep(ω; NLegendre, σ, μₘ, σₘ))  # sometimes called with only σ a Dual(), don't know why
 	zdivσ = z/σ[]
 
+	# Pr[no p-hacking|z₀] & Pr[insig p-hack result|z₀], using math for partial first moment E[X^m|m>1] where m ~ 𝒩(μₘ,σₘ²) and x = Pr[|z₁ⱼ|<z̄|z₀] (p-hack failure on try j)
+	function lnF_no_phack_and_insig_phack(z₀divσ)
+		lnI_H = logdiffcdf(𝒩, z₀divσ+o.z̄divσ, z₀divσ-o.z̄divσ)
+		S_H = ccdf(𝒩, o.z̄divσ+z₀divσ) + ccdf(𝒩, o.z̄divσ-z₀divσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
+		_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
+		μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
+		COVₘ = -μ̃ₘ/_σₘ
+
+		logcdf(𝒩,(1-_μₘ)/_σₘ),  # lnF_no_phack
+		  logccdf(𝒩, COVₘ) + (_μₘ + .5*_σₘ^2 * lnI_H) * lnI_H  # lnF_insig_phack
+	end
+	
+	# Compure Pr[z₁,₁, ..., z₁,₍ₘ₋₁₎ < z₁ₘ | z₀]. This times f(z₁ₘ|z₀)=𝒩(z₀,σ²) is the p-hacking distsribution (lnf_phack)
+	# so lnf_phack() isn't quite the right name
+	function lnf_phack(z₀divσ, abszdivσ)
+		lnI_H = logdiffcdf(𝒩, z₀divσ+abszdivσ, z₀divσ-abszdivσ)
+		S_H = ccdf(𝒩, o.z̄divσ+z₀divσ) + ccdf(𝒩, o.z̄divσ-z₀divσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
+		_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
+		μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
+		COVₘ = -μ̃ₘ/_σₘ
+
+		# hazard ratio-based expression, log(hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1)
+		logccdf_𝒩_COVₘ = logccdf(𝒩,COVₘ)
+		if COVₘ < -1e3
+			loghr_exp = 1 + _σₘ / COVₘ  # for x->-∞, log(hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1) -> 1 +_σₘ/COVₘ
+		else
+			if COVₘ < 1e4
+				loghr_exp = exp(logpdf(𝒩,COVₘ) - logccdf_𝒩_COVₘ)
+			else
+				loghr_exp = COVₘ + 1/ COVₘ  # for large x, hr ≈ x + 1/x
+			end
+			loghr_exp = log(loghr_exp * _σₘ + μ̃ₘ + 1)
+		end
+
+		(_μₘ-1 + .5_σₘ^2 * lnI_H) * lnI_H + logccdf(𝒩, COVₘ) + loghr_exp
+	end
+
 	if	!(-eps() < z < eps())
 		modelabsz && (neg2zdivσ = -2zdivσ)
 
 		@inbounds for k ∈ 1:(NLegendre + 1) ÷ 2  # for each non-positive z₀ quadrature point (most calculations symmetric in z₀, and all if modelabsz)
-			lnI_H = logdiffcdf(𝒩, o.Z₀divσ[k]+abs(zdivσ), o.Z₀divσ[k]-abs(zdivσ))
-			S_H = ccdf(𝒩, o.z̄divσ+o.Z₀divσ[k]) + ccdf(𝒩, o.z̄divσ-o.Z₀divσ[k])  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
-			_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-			μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
-			COVₘ = -μ̃ₘ/_σₘ
-			loghr = COVₘ > -1000 ? log(hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1) : 1 + _σₘ/COVₘ  # asymptotic approximation because of loss of numerical precision in exact expression
-			lnf_Z₁condZ₀ₖ = log(o.W[k]) + (_μₘ-1 + .5_σₘ^2 * lnI_H) * lnI_H + logccdf(𝒩, COVₘ) + loghr
+			lnf_Z₁condZ₀ₖ = log(o.W[k]) + lnf_phack(o.Z₀divσ[k], abs(zdivσ))
 
 			# component asymmetric in z₀
 			o.lnf_Z₁condZ₀[k] = logpdf(𝒩, o.Z₀divσ[k]-zdivσ) + lnf_Z₁condZ₀ₖ
@@ -166,22 +197,20 @@ function lnfZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, μₘ, σₘ
 
 	pD, pF, pR = pDFR
 
-	if -z̄ ≤ z ≤ z̄ 
-		lnI_H = logdiffcdf(𝒩, zdivσ+o.z̄divσ, zdivσ-o.z̄divσ)
-		S_H = ccdf(𝒩, o.z̄divσ+zdivσ) + ccdf(𝒩, o.z̄divσ-zdivσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
-		_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-		μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
-		COVₘ = -μ̃ₘ/_σₘ
-		lnf_no_phack = log(pR+pD) + logcdf(𝒩, (1-_μₘ)/_σₘ)
-		lnf_no_sig_phack = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logccdf(𝒩, COVₘ) + (_μₘ + .5_σₘ^2 * lnI_H) * lnI_H)  # probability of either no or unsuccesful p-hacking
+	if -z̄ ≤ z ≤ z̄
+		lnF_no_phack, lnF_insig_phack = lnF_no_phack_and_insig_phack(zdivσ)
+		lnF_no_sig_phack = pR < eps() ? log(pD) + lnF_no_phack : logsumexp(log(pR+pD) + lnF_no_phack, log(pR) + lnF_insig_phack)
 	end
 
 	if -eps() ≤ z ≤ eps()
-		∫ = lnf_no_sig_phack + lnf_z₀ᵢⱼ
+		∫ = lnF_no_sig_phack + lnf_z₀ᵢⱼ
 	else
 		lnf_Z₁ = @inbounds logsumexp(o.lnf_Z₁condZ₀[k] + o.lnf_z₀ᵢ[k] for k ∈ 1:NLegendre) - log(σ[])  # constant left out of lnf_Z₁condZ₀ for speed
-		∫ = -z̄ ≤ z ≤ z̄ ? pD < eps() ? f_Z₁ : logsumexp(lnf_no_sig_phack + lnf_z₀ᵢⱼ, log(pD) + lnf_Z₁) :
-																				 logsumexp(lnf_z₀ᵢⱼ                   ,           lnf_Z₁)
+		∫ = -z̄ ≤ z ≤ z̄ ? 
+				  pD < eps() ? 
+						          lnF_no_sig_phack + lnf_z₀ᵢⱼ :
+						logsumexp(lnF_no_sig_phack + lnf_z₀ᵢⱼ, log(pD) + lnf_Z₁) :
+					logsumexp(                     lnf_z₀ᵢⱼ,           lnf_Z₁)
 	end
 
 	∫, pF * o.F_insig
@@ -225,6 +254,7 @@ fΩcondZ(ω, z; p, μ, τ, ν, NHermite=50, NLegendre=50, kwargs...) = fZcondΩ(
 EΩcondZ(z; rtol=.00001, maxevals=1e4, p, μ, τ, ν, NHermite=50, NLegendre=50, kwargs...) = [quadgk(ω -> ω * fZcondΩ(zᵢ, ω; kwargs..., NLegendre, truncate=false) * fΩ(ω; p, μ, τ, ν), -20, 20; rtol, maxevals)[1] for zᵢ∈z] ./ 
                                                                       fZ(z; p, μ, τ, ν, kwargs..., NLegendre, NHermite, truncate=false)
 
+
 # CIs
 Cquant(α, z; kwargs...) = find_zero(ω -> α - FZcondΩ(z, ω; kwargs...), (-20,20), Roots.ITP())  # Andrews & Kasy (2019), eq. 2
 CI(    α, z; kwargs...) = Cquant(α/2, z; kwargs...), Cquant(1-α/2, z; kwargs...)
@@ -246,8 +276,9 @@ struct HnFmodel
   penalty::Function
 	lnf_z₀_ikdict::Dict{DataType, Vector}  # collections of pre-allocated arrays for use in likelihood computation, separate for Float64, ForwardDiff.Dual, etc.
 	Z₀divσdict::Dict{DataType, Vector}  # collections of pre-allocated arrays for use in likelihood computation, separate for Float64, ForwardDiff.Dual, etc.
-	logf_no_sig_phackdict::Dict{DataType, Vector}
+	lnF_no_sig_phackdict::Dict{DataType, Vector}
 	f_Z₁condZ₀dict::Dict{DataType, Matrix}
+	F_insig_Z₀dict::Dict{DataType, Vector}
 	∫dict::Dict{Tuple{DataType, Int64}, Matrix}
 
 	function HnFmodel(z, wt=Float64[]; d::Int, modelabsz=false, NHermite=50, NLegendre=50, penalty::Function=(; kwargs...)->0.)
@@ -256,7 +287,7 @@ struct HnFmodel
 		Z₀, W = gausslegendre(NLegendre)  # nodes and weights for Gauss-Legendre quadrature over [-1,1]
 		Z₀ .*= z̄; W .*= z̄  # change of variables to quadrature over [-z̄, z̄]
 		
-		new(modelabsz, [d], z, wt/mean(wt), length(z), -z̄.≤z.≤z̄, -eps().<z.<eps(), NHermite, Ω, WHermite, log.(WHermite).+.5Ω.^2, NLegendre, Z₀, W, log.(W), penalty, Dict(), Dict(), Dict(), Dict(), Dict())
+		new(modelabsz, [d], z, wt/mean(wt), length(z), -z̄.≤z.≤z̄, -eps().<z.<eps(), NHermite, Ω, WHermite, log.(WHermite).+.5Ω.^2, NLegendre, Z₀, W, log.(W), penalty, Dict(), Dict(), Dict(), Dict(), Dict(), Dict())
 	end
 end
 
@@ -276,15 +307,53 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 	is = findall(>(1e-6), p)  # ~nonzero mixture components
 	_d = length(is)
 
-	# fetch previoiusly allocated objects of needed element type, or allocate if needed
+	# fetch previoiusly allocated objects of needfed element type, or allocate if needed
 	∫                 = get!(                 M.∫dict, (T,_d), Matrix{T}(undef,M.N,_d))::Matrix{T}
 	lnf_Z₁condZ₀      = get!(        M.f_Z₁condZ₀dict,  T    , Matrix{T}(undef,M.N,M.NLegendre))::Matrix{T}
 	lnf_z₀ᵢ           = get!(         M.lnf_z₀_ikdict,  T    , Vector{T}(undef, M.NLegendre))::Vector{T}
 	Z₀divσ            = get!(            M.Z₀divσdict,  T    , Vector{T}(undef, M.NLegendre))::Vector{T}
-	logf_no_sig_phack = get!( M.logf_no_sig_phackdict,  T    , Vector{T}(undef, M.N))::Vector{T}
+	lnF_no_sig_phack  = get!(  M.lnF_no_sig_phackdict,  T    , Vector{T}(undef, M.N))::Vector{T}
+	F_insig_Z₀        = get!(        M.F_insig_Z₀dict,  T    , Vector{T}(undef, M.NLegendre))::Vector{T}
 
 	@. Z₀divσ = M.Z₀ / σ[]; z̄divσ = z̄ / σ[]
 
+	# Pr[no p-hacking|z₀] & Pr[insig p-hack result|z₀], using math for partial first moment E[X^m|m>1] where m ~ 𝒩(μₘ,σₘ²) and x = Pr[|z₁ⱼ|<z̄|z₀] (p-hack failure on try j)
+	function lnF_no_phack_and_insig_phack(z₀divσ)
+		lnI_H = logdiffcdf(𝒩, z₀divσ+z̄divσ, z₀divσ-z̄divσ)
+		S_H = ccdf(𝒩, z₀divσ+z̄divσ) + cdf(𝒩, z₀divσ-z̄divσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
+		_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
+		COVₘ = -μₘ[]/σₘ[] - _σₘ * lnI_H + 1/_σₘ  # = -μ̃ₘ/_σₘ, with μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1; writing it this way reduces NaN in Hessian
+
+		return logcdf(𝒩, 1/_σₘ-μₘ[]/σₘ[]),  # lnF_no_phack; argument is (1-_μₘ)/_σₘ; writing it this way reduces NaN in Hessian
+		       logccdf(𝒩, COVₘ) + (_μₘ + .5*_σₘ^2 * lnI_H) * lnI_H  # lnF_insig_phack
+	end
+	
+	# Compure Pr[z₁,₁, ..., z₁,₍ₘ₋₁₎ < z₁ₘ | z₀]. This times f(z₁ₘ|z₀)=𝒩(z₀,σ²) is the p-hacking distsribution
+	# so lnf_phack() isn't quite the right name
+	S_H_z₀	 = ccdf.(𝒩, Z₀divσ .+ z̄divσ) .+ cdf(𝒩, Z₀divσ .- z̄divσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
+	_μₘ_z₀, _σₘ_z₀ = S_H_z₀ * μₘ[], S_H_z₀ * σₘ[]
+
+	@inbounds function lnf_phack(k, abszdivσ)
+		lnI_H = logdiffcdf(𝒩, Z₀divσ[k]+abszdivσ, Z₀divσ[k]-abszdivσ)
+		μ̃ₘ = _μₘ_z₀[k] + _σₘ_z₀[k]^2 * lnI_H - 1
+		COVₘ = -μₘ[]/σₘ[] - _σₘ_z₀[k] * lnI_H + 1/_σₘ_z₀[k]  # = -μ̃ₘ/_σₘ; writing it this way may reduce NaNs in Hessians
+
+		# hazard ratio-based expression, log(hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1)
+		logccdf_𝒩_COVₘ = logccdf(𝒩,COVₘ)
+		if COVₘ < -1e3
+			loghr_exp = 1 + _σₘ_z₀[k] / COVₘ  # for x->-∞, log(hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1) -> 1 +_σₘ/COVₘ
+		else
+			if COVₘ < 1e4
+				loghr_exp = exp(logpdf(𝒩,COVₘ) - logccdf_𝒩_COVₘ)
+			else
+				loghr_exp = COVₘ + 1 / COVₘ  # for largish x, hr ≈ x + 1/x
+			end
+			loghr_exp = log(loghr_exp * _σₘ_z₀[k] + μ̃ₘ + 1)
+		end
+
+		return (_μₘ_z₀[k]-1 + .5_σₘ_z₀[k]^2 * lnI_H) * lnI_H + logccdf_𝒩_COVₘ + loghr_exp
+	end
+	
 	# f(z₁|z₀) to be convolved with f(z₀) later using Legendre quadrature; already includes the Legendre weights
 	Threads.@threads for j ∈ eachindex(M.z)
 		@inbounds begin
@@ -293,13 +362,7 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 			if !M.approxzero[j]
 				M.modelabsz && (neg2zdivσ = -2zdivσ)
 				for k ∈ 1:(M.NLegendre + 1) ÷ 2  # for each non-positive z₀ quadrature point (most calculations symmetric in z₀, and all if modelabsz)
-					lnI_H = logdiffcdf(𝒩, Z₀divσ[k]+abs(zdivσ), Z₀divσ[k]-abs(zdivσ))
-					S_H = ccdf(𝒩, z̄divσ+Z₀divσ[k]) + ccdf(𝒩, z̄divσ-Z₀divσ[k])  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
-					_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-					μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
-					COVₘ = -μ̃ₘ/_σₘ
-					loghr = COVₘ > -1000 ? log(hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1) : 1 + _σₘ/COVₘ  # asymptotic approximation because of loss of numerical precision in exact expression
-					lnf_Z₁condZ₀ⱼₖ = M.lnWLegendre[k] + (_μₘ-1 + .5_σₘ^2 * lnI_H) * lnI_H + logccdf(𝒩, COVₘ) + loghr
+					lnf_Z₁condZ₀ⱼₖ = M.lnWLegendre[k] + lnf_phack(k, abs(zdivσ))
 
 					# sole component asymmetric in z₀ (if !modelabsz); NaN here means f(z₁|z₀)=0 within achieved numerical precision
 					lnf_Z₁condZ₀[j,k] = logpdf(𝒩, Z₀divσ[k]-zdivσ) + lnf_Z₁condZ₀ⱼₖ
@@ -313,18 +376,18 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 			end
  
 			if M.insig[j]
-				lnI_H = logdiffcdf(𝒩, zdivσ+z̄divσ, zdivσ-z̄divσ)
-				S_H = ccdf(𝒩, z̄divσ+zdivσ) + ccdf(𝒩, z̄divσ-zdivσ)  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
-				_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-				μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
-				COVₘ = -μ̃ₘ/_σₘ
-				lnf_no_phack = log(pR+pD) + logcdf(𝒩, (1-_μₘ)/_σₘ)
-				logf_no_sig_phack[j] = pR < eps() ? lnf_no_phack : logsumexp(lnf_no_phack, log(pR) + logccdf(𝒩, COVₘ) + (_μₘ + .5*_σₘ^2 * lnI_H) * lnI_H)  # probability of either no or unsuccesful p-hacking
+				lnF_no_phack, lnF_insig_phack = lnF_no_phack_and_insig_phack(zdivσ)
+				lnF_no_sig_phack[j] = pR < eps() ? log(pD) + lnF_no_phack : logsumexp(log(pR+pD) + lnF_no_phack, log(pR) + lnF_insig_phack)
 			end
 		end
 	end
 
-	I₀ = f_insig = zero(T)  # accumulators for expected number of initially insig results, and number of publish/file-drawer/p-hack decision junctures
+	@inbounds for k ∈ eachindex(M.Z₀)
+		lnF_no_phack, lnF_insig_phack = lnF_no_phack_and_insig_phack(Z₀divσ[k])
+		F_insig_Z₀[k] = M.WLegendre[k] * (exp(lnF_no_phack) + exp(lnF_insig_phack))
+	end
+
+	I₀ = F_insig = zero(T)  # accumulators for expected number of initially insig results, and number of publish/file-drawer/p-hack decision junctures
 	@inbounds for _i ∈ 1:_d  # iterate over non~zero mixture components
 		i = is[_i]
 
@@ -338,22 +401,16 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 		lnf_z₀_i(z₀) = logsumexp(begin  # ln [∫_(-∞)^∞ ϕ(z₀;ω)t(ω;μ,τᵢ²,νᵢ)dω] sans ln Cᵢ factor
 																d = (z₀ - μ[]) / sqrt_τᵢ²
 																lnwpx² - halfinv_τᵢ² * (x - d / τᵢ²)^2 - log1p((x + d)^2 / D) * _νᵢ
-															end
-															for (x,lnwpx²) ∈ zip(M.Ω, M.lnWpΩ²))
+														 end
+														 for (x,lnwpx²) ∈ zip(M.Ω, M.lnWpΩ²))
 
-		I₀ᵢ = f_insigᵢ = zero(T)
+		I₀ᵢ = F_insigᵢ = zero(T)
 		@inbounds for k ∈ eachindex(M.Z₀)  # for each z₀ quadrature point
 			lnf_z₀ᵢ[k] = lnf_z₀ᵢₖ = lnf_z₀_i(M.Z₀[k])
 			I₀ᵢ += exp(M.lnWLegendre[k] + lnf_z₀ᵢₖ)
-		
-			lnI_H = logdiffcdf(𝒩, Z₀divσ[k]+z̄divσ, Z₀divσ[k]-z̄divσ)
-			S_H = ccdf(𝒩, z̄divσ+Z₀divσ[k]) + ccdf(𝒩, z̄divσ-Z₀divσ[k])  # Pr[success per p-hack try | z₀], assumed = to researcher's mean expectation thereof
-			_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-			μ̃ₘ = _μₘ + _σₘ^2 * lnI_H - 1
-			COVₘ = -μ̃ₘ/_σₘ
-			f_insigᵢ += M.WLegendre[k] * (ccdf(𝒩,(_μₘ-1)/_σₘ) + exp((_μₘ + .5_σₘ^2 * lnI_H) * lnI_H + logccdf(𝒩,COVₘ))) * exp(lnf_z₀ᵢₖ)
+			F_insigᵢ += F_insig_Z₀[k] * exp(lnf_z₀ᵢₖ)
 		end
-		f_insig += exp(Cᵢ) * f_insigᵢ
+		F_insig += exp(Cᵢ) * F_insigᵢ
 		I₀ += exp(Cᵢ) * I₀ᵢ
 
 		Threads.@threads for j ∈ eachindex(M.z)  # for each z value/interpolation point
@@ -362,23 +419,28 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
 
 				lnf_z₀ᵢⱼ = M.modelabsz ? logsumexp(lnf_z₀_i(z), lnf_z₀_i(-z)) : lnf_z₀_i(z)
 				if M.approxzero[j]
-					∫[j,_i] = Cᵢ + logf_no_sig_phack[j] + lnf_z₀ᵢⱼ
+					∫[j,_i] = Cᵢ + lnF_no_sig_phack[j] + lnf_z₀ᵢⱼ
 				else
 					try
-						lnf_Z₁ = logsumexp(lnf_Z₁condZ₀[j,k] + lnf_z₀ᵢ[k] for k ∈ eachindex(M.Z₀) if !isnan(lnf_Z₁condZ₀[j,k])) - log(σ[])  # last term left out of lnf_Z₁condZ₀ for speed
-						∫[j,_i] = Cᵢ + (M.insig[j] ? pD < eps() ? lnf_Z₁ : logsumexp(logf_no_sig_phack[j] + lnf_z₀ᵢⱼ, log(pD) + lnf_Z₁) :
-																															 logsumexp(                       lnf_z₀ᵢⱼ,           lnf_Z₁)  )
+						lnf_Z₁ = logsumexp(lnf_Z₁condZ₀[j,k] + lnf_z₀ᵢ[k] for k ∈ eachindex(M.Z₀) if !isnan(lnf_Z₁condZ₀[j,k])) - log(σ[])  # log(σ[]) term left out of lnf_Z₁condZ₀ for speed
+						∫[j,_i] = Cᵢ + (M.insig[j] ?
+															pD < eps() ?
+																          lnF_no_sig_phack[j] + lnf_z₀ᵢⱼ
+															:
+																logsumexp(lnF_no_sig_phack[j] + lnf_z₀ᵢⱼ, log(pD) + lnf_Z₁)
+														:
+															logsumexp(                        lnf_z₀ᵢⱼ,           lnf_Z₁)
+													 )
 					catch _  # logsumexp will fail if _all_ lnf_Z₁condZ₀[j,k] are NaN, which would be failure of Legendre quadrature
 						∫[j,_i] = Cᵢ + (M.insig[j] ? pD < eps() ? -Inf :   # if σₘ is extremely small, estimated Pr(z₁|z₀) could be computed as exactly 0 for all integration points z₀; if pD=0 too, then estimated Pr[z]=0, and loglik evaluator has failed
-																											 logf_no_sig_phack[j] + lnf_z₀ᵢⱼ :
+																											 lnF_no_sig_phack[j] + lnf_z₀ᵢⱼ :
 																				 lnf_z₀ᵢⱼ)
-
 					end
 				end
 			end
 		end
 	end
-  logsumexp!(logf_no_sig_phack, ∫), pF * f_insig, I₀  # sum across mixture components, into `logf_no_sig_phack` because it's the right size and already allocated
+  logsumexp!(lnF_no_sig_phack, ∫), pF * F_insig, I₀  # sum across mixture components, into `lnF_no_sig_phack` because it's the right size and already allocated
 end
 
 # returns negative of penalized log likelihood
@@ -584,7 +646,6 @@ function add_derived_stats!(est::HnFresult)
 				μ̃ₘ = _μₘ + _σₘ^2 * lnx
 				exp((_μₘ + .5_σₘ^2 * lnx) * lnx + logcdf(Normal(0,_σₘ),μ̃ₘ-1))
 		end
-		f_insig(z₀) = f_no_phack(z₀)+ f_phacked_insig_z(z₀)  #  Pr[p-hacking not tried or (p-hacking tried and |z₁|<z̄) | |z₀|<z̄]
 
 		f_Z₁(z₁) = hcubature(v->begin  # distribution of p-hacked z₁
 												  (ω,z₀)=v
@@ -666,7 +727,7 @@ function HnFestimate(df::DataFrame, z::Symbol, wt=nothing; dmax=2, estname="", N
 	add_derived_stats!(est)
 end
 
-function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot::StepRangeLen=-5+1e-3:.01:5, ωplot::StepRangeLen=zplot, title::String="", noAKplots::Bool=true)
+function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot=-5+1e-3:.01:5, ωplot=zplot, title::String="", noAKplots::Bool=true)
 	t = est.coefdict
 	kwargsω = (p=t.p, μ=t.μ, τ=t.τ, ν=t.ν)
 	kwargsz = (pDFR=t.pDFR, σ=t.σ, μₘ=t.μₘ, σₘ=t.σₘ)
@@ -697,14 +758,14 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 	ω = 2.
 	Axis(f[1,2], xlabel="Reported z | true z = $ω", ylabel="Density")
 	lines!(zplot, fZcondΩ.(zplot, ω; kwargsz0..., NLegendre), label="updating from prior")
-	lines!(zplot, fZcondΩ.(zplot, ω; kwargsz..., NLegendre), label="updating from prior + research distortion", color=Makie.wong_colors()[6])
+	lines!(zplot, fZcondΩ.(zplot, ω; kwargsz..., NLegendre), label="updating from prior + p-hacking", color=Makie.wong_colors()[6])
 	axislegend(position=:lt, framevisible = false)
 	
 	# distribution of ω | z=2
 	_z = 2.
 	Axis(f[2,1], xlabel="True z | reported z = $_z", ylabel="Density")
 	lines!(ωplot, fΩcondZ.(ωplot, _z; kwargsω..., kwargsz0..., NLegendre, NHermite), label="updating from prior")
-	lines!(ωplot, fΩcondZ.(ωplot, _z; kwargsω..., kwargsz..., NLegendre, NHermite), label="updating from prior + research distortion", color=Makie.wong_colors()[6])
+	lines!(ωplot, fΩcondZ.(ωplot, _z; kwargsω..., kwargsz..., NLegendre, NHermite), label="updating from prior + research p-hacking", color=Makie.wong_colors()[6])
 	axislegend(position=:lt, framevisible = false)
 	
 	# frequentist equal-tailed CI's as fn of z--Andrews & Kasy (2014), Figure 2
@@ -714,18 +775,21 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 	lines!(zplot, CIs0[:,1], color=Makie.wong_colors()[1], label="No adjustment")
 	lines!(zplot, CIs0[:,2], color=Makie.wong_colors()[1], linestyle=:dash)
 	lines!(zplot, CIs0[:,3], color=Makie.wong_colors()[1])
-	lines!(zplot, CIs[:,1], color=Makie.wong_colors()[6], label="Adjusting for research distortion")
+	lines!(zplot, CIs[:,1], color=Makie.wong_colors()[6], label="Adjusting for p-hacking")
 	lines!(zplot, CIs[:,2], color=Makie.wong_colors()[6], linestyle=:dash)
 	lines!(zplot, CIs[:,3], color=Makie.wong_colors()[6])
-
-	s,e = extrema(findall(x->abs(x)<.1, CIs[:,1]))
-	lb = linear_interpolation(denoise(CIs[:,1], factor=.1)[1][s:e], zplot[s:e])(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
-	s,e = extrema(findall(x->abs(x)<.1, CIs[:,3]))
-	ub = linear_interpolation(denoise(CIs[:,3], factor=.1)[1][s:e], zplot[s:e])(0.)
-	scatter!([lb;ub],[0.;0], color=Makie.wong_colors()[6])
-	text!(lb, 0., text=format("{:03.2f}", lb), align=(:right, :bottom), fontsize=18)
-	text!(ub, 0., text=format("{:03.2f}", ub), align=(:left, :top), fontsize=18)
 	axislegend(position=:lt, framevisible = false)
+
+	t = findall(x->abs(x)<.1, CIs[:,1])
+	if length(t)> 0
+		s,e = extrema(findall(x->abs(x)<.1, CIs[:,1]))
+		lb = linear_interpolation(denoise(CIs[:,1], factor=.1)[1][s:e], zplot[s:e])(0.)  # McCrary, Christensen, and Fanelli (2016)-style z thresholds for p<.05
+		s,e = extrema(findall(x->abs(x)<.1, CIs[:,3]))
+		ub = linear_interpolation(denoise(CIs[:,3], factor=.1)[1][s:e], zplot[s:e])(0.)
+		scatter!([lb;ub],[0.;0], color=Makie.wong_colors()[6])
+		text!(lb, 0., text=format("{:03.2f}", lb), align=(:right, :bottom), fontsize=18)
+		text!(ub, 0., text=format("{:03.2f}", ub), align=(:left, :top), fontsize=18)
+	end
 
 	# Posterior mean of ω as fn of Z
 	pplot0 = EΩcondZ(zplot; kwargsω..., kwargsz0..., NLegendre, NHermite)
@@ -733,13 +797,13 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot:
 	Axis(f[2,2], xlabel="Reported z", ylabel="Expected true z")
 	lines!(zplot, zplot, label="As is", color=Makie.wong_colors()[3])
 	lines!(zplot, pplot0, label="Updating from prior", color=Makie.wong_colors()[1])
-	lines!(zplot, pplot , label="updating from prior + research distortion", color=Makie.wong_colors()[6])
+	lines!(zplot, pplot , label="updating from prior + p-hacking", color=Makie.wong_colors()[6])
 	axislegend(position=:lt, framevisible = false)
 
 	# E[ω] discount
 	Axis(f[2,3], xlabel="Reported z", ylabel="Discount multiplier" #=, yticks=0:.1:1.5 , limits=(nothing,nothing,0.,nothing)=#)
 	lines!(zplot[zplot.>.2], Float16.(pplot0[zplot.>.2]./zplot[zplot.>.2]), label="updating from prior")  # https://discourse.julialang.org/t/range-step-cannot-be-zero/66948/11?u=droodman
-	lines!(zplot[zplot.>.2], Float16.(pplot[zplot.>.2]./zplot[zplot.>.2]), label="updating from prior + research distortion", color=Makie.wong_colors()[6])
+	lines!(zplot[zplot.>.2], Float16.(pplot[zplot.>.2]./zplot[zplot.>.2]), label="updating from prior + p-hacking", color=Makie.wong_colors()[6])
   y = EΩcondZ([2]; kwargsω..., kwargsz0..., NLegendre, NHermite)[] / 2
   scatter!(2, y, color=Makie.wong_colors()[1])
 	text!(2, y, text=format("{:03.2f}", y), align=(:center, :bottom), fontsize=18)
@@ -803,10 +867,11 @@ res = HnFfit(sim.z; d, modelabsz, NLegendre=50, estname="simulated", extended_tr
 print(res.coefdict)
 lines!(zplot, fZ(zplot; modelabsz, res.coefdict...), color=:blue, label="Fitted model")
 
-f[0, :] = Label(f, "Simulation vs model")
+f[0,:] = Label(f, "Simulation vs model")
 axislegend(position=:lt, framevisible=false)
 colsize!(f.layout, 1, Relative(1))
 f |> display
+
 
 #
 # model real data
@@ -815,8 +880,8 @@ f |> display
 @time begin
 	# penalty function for parameters that can generate singularities
   penalty(; τ::Vector{T}, σ::Vector{T}, σₘ::Vector{T}, file_drawer_insig::T, kwargs...) where {T} = 
-		logpdf(Normal(0,5), log(σ[])) + 
-		logpdf(Normal(0,5), log(σₘ[])) + 
+		logpdf(Normal(0,50), log(σ[])) + 
+		logpdf(Normal(0,50), log(σₘ[])) + 
 		sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) +
 		logpdf(Beta(2,1),file_drawer_insig)
 
@@ -851,7 +916,7 @@ f |> display
 	disallowmissing!(df, :z)
 	hist(df.z, bins=100) |> display
 	df.z .= abs.(df.z)
-  BCH = HnFestimate(df, :z; penalty, xform=(μ=get0,), modelabsz=true, estname="BCH")
+  BCH = HnFestimate(df, :z; penalty, modelabsz=true, estname="BCH")
 	HnFplot(df.z, BCH; title="Brodeur, Cook, and Heyes (2020) data")
 
 	# Arel-Bundock et al. 2026
