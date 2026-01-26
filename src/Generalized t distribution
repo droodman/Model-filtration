@@ -22,3 +22,4 @@ Distributions.logpdf(  d::GenT, x::Real) = logpdf(  d.tdist, (x - d.μ) / d.σ) 
 Distributions.cdf(     d::GenT, x::Real) = cdf(     d.tdist, (x - d.μ) / d.σ)
 Distributions.logcdf(  d::GenT, x::Real) = logcdf(  d.tdist, (x - d.μ) / d.σ)
 Distributions.quantile(d::GenT, p::Real) = quantile(d.tdist, p) * d.σ + d.μ
+Distributions.logdiffcdf(d::GenT, b::Real, a::Real) = logdiffcdf(d.tdist, (b - d.μ) / d.σ, (a - d.μ) / d.σ)
