@@ -1,0 +1,24 @@
+#
+# generalized t distribution: adds μ and σ parameters
+#
+
+using Distributions
+
+const 𝒩 = Normal()
+const z̄ = quantile(𝒩, .975)  # 1.96
+
+@inline diffcdf(N,b,a) = cdf(N,b) - cdf(N,a)
+
+struct GenT{T<:Real} <: ContinuousUnivariateDistribution
+	ν::T; μ::T; σ::T
+
+	lnσ::T
+	tdist::TDist{T}  # underlying Student's t distribution
+
+	GenT(ν::T, μ::T, σ::T) where {T<:Real} = new{T}(ν, μ, σ, log(σ), TDist{T}(ν))
+end
+Distributions.pdf(     d::GenT, x::Real) = pdf(     d.tdist, (x - d.μ) / d.σ) / d.σ
+Distributions.logpdf(  d::GenT, x::Real) = logpdf(  d.tdist, (x - d.μ) / d.σ) - d.lnσ
+Distributions.cdf(     d::GenT, x::Real) = cdf(     d.tdist, (x - d.μ) / d.σ)
+Distributions.logcdf(  d::GenT, x::Real) = logcdf(  d.tdist, (x - d.μ) / d.σ)
+Distributions.quantile(d::GenT, p::Real) = quantile(d.tdist, p) * d.σ + d.μ

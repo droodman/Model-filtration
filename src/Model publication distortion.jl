@@ -8,30 +8,10 @@ Pkg.instantiate()  # make sure all packages installed
 using Random, IrrationalConstants, Format, Distributions, Interpolations, Base.Iterators, FastGaussQuadrature, Optim, LogExpFunctions, CSV, DataFrames, DataFramesMeta, ForwardDiff, LinearAlgebra, Roots, QuadGK, Statistics, 
        InverseFunctions, StatsAPI, StatsBase, StatsModels, RegressionTables, Unicode, CairoMakie, Makie, ExcelFiles, XLSX, RData, SpecialFunctions, ThreadsX, HCubature, KissSmoothing
 
-const 𝒩 = Normal()
-const z̄ = quantile(𝒩, .975)  # 1.96
+include("Generalized t distribution")
 
-@inline diffcdf(N,b,a) = cdf(N,b) - cdf(N,a)
 @inline hr(d::Normal,x) = (t=(x-Distributions.location(d))/Distributions.scale(d)) > 1e4 ? (t+1/t)/Distributions.scale(d) : exp(logpdf(d,x) - logccdf(d,x))  # standard normal hazard ratio/inverse Mills ratio
 @inline sqrt0(x::T) where {T} = x<0 ? zero(T) : sqrt(x)
-
-
-#
-# generalized t distribution: adds μ and σ parameters
-#
-struct GenT{T<:Real} <: ContinuousUnivariateDistribution
-	μ::T; σ::T; ν::T
-
-	lnσ::T
-	tdist::TDist{T}  # underlying Student's t distribution
-
-	GenT(μ::T, σ::T, ν::T) where {T<:Real} = new{T}(μ, σ, ν, log(σ), TDist{T}(ν))
-end
-Distributions.pdf(     d::GenT, x::Real) = pdf(     d.tdist, (x - d.μ) / d.σ) / d.σ
-Distributions.logpdf(  d::GenT, x::Real) = logpdf(  d.tdist, (x - d.μ) / d.σ) - d.lnσ
-Distributions.cdf(     d::GenT, x::Real) = cdf(     d.tdist, (x - d.μ) / d.σ)
-Distributions.logcdf(  d::GenT, x::Real) = logcdf(  d.tdist, (x - d.μ) / d.σ)
-Distributions.quantile(d::GenT, p::Real) = quantile(d.tdist, p) * d.σ + d.μ
 
 
 # to parameterize an n-vector of probabilities summing to 1 with an unbounded (n-1)-vector, apply logistic transform to latter, then map to squared spherical coordinates
@@ -246,8 +226,8 @@ end
 
 # f(z), f(ω), f(ω|z), E[ω|z]
 # inconsistency: z should be a scalar for fΩcondZ but a vector or other iterable for EΩcondZ
-@inline fΩ(ω; p, μ, τ, ν) = p'pdf.(GenT.(μ,τ,ν), ω)
-@inline lnfΩ(ω; p, μ, τ, ν) = @inbounds logsumexp(log(p[i]) + logpdf(GenT(μ[],τ[i],ν[i]), ω) for i ∈ eachindex(p))
+@inline fΩ(ω; p, μ, τ, ν) = p'pdf.(GenT.(ν,μ,τ), ω)
+@inline lnfΩ(ω; p, μ, τ, ν) = @inbounds logsumexp(log(p[i]) + logpdf(GenT(ν[i],μ[],τ[i]), ω) for i ∈ eachindex(p))
 @inline fZ₀condΩ(z₀,ω) = pdf(𝒩,z₀-ω)
 @inline lnfZ₀condΩ(z₀,ω) = logpdf(𝒩,z₀-ω)
 fΩcondZ(ω, z; p, μ, τ, ν, NHermite=50, NLegendre=50, kwargs...) = fZcondΩ(z, ω; NLegendre, kwargs..., truncate=false) * fΩ(ω; p, μ, τ, ν) / fZ([z]; p, μ, τ, ν, kwargs..., NLegendre, NHermite, truncate=false)[]
@@ -460,7 +440,7 @@ function HnFDGP(N::Int; p::Vector{Float64}, μ::Vector{Float64}=[0.], τ::Vector
 	z₁ = fill(NaN,N)
 	m = zeros(Int,N)
 	z = similar(ω)
-	Tμτν = GenT.(μ, τ, ν)
+	Tμτν = GenT.(ν,μ,τ)
 
 	Threads.@threads for i ∈ eachindex(z₀)  # for each simulated study
 		@inbounds begin
@@ -742,8 +722,8 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, NHermite=50, zplot=
 
 	s,e = extrema(z); _zplot = s:.01:e
 
-  pplottrue                     = map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν),  z)), _zplot)
-  est.modelabsz && (pplottrue .+= map(z->dot(t.p, pdf.(GenT.(kwargsω.μ, t.τ, t.ν), -z)), _zplot))
+  pplottrue                     = map(z->dot(t.p, pdf.(GenT.(t.ν, kwargsω.μ, t.τ),  z)), _zplot)
+  est.modelabsz && (pplottrue .+= map(z->dot(t.p, pdf.(GenT.(t.ν, kwargsω.μ, t.τ), -z)), _zplot))
 	pplottrue ./= 1 - est.coef[findfirst(==("overall_file_drawer_frac"), est.coefnames)]
 
 	pplotinitial = fZ(_zplot; kwargsω..., kwargsz0..., modelabsz=est.modelabsz, NLegendre, NHermite)
