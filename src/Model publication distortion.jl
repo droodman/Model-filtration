@@ -992,3 +992,20 @@ f |> display
 							number_regressions = false,
 							file = "output/results.txt")
 end
+
+# fit t distribution to specification curve in Huntington-Klein et al. (2025) working paper (emailed by Huntington-Klein)
+df = DataFrame(XLSX.readtable("/Users/davidroodman/Library/CloudStorage/OneDrive-Personal/Documents/Work/Library/Metascience/Huntington-Klein et al. 2025/Specification_curve_data.xlsx", "Sheet1", infer_eltypes=true)...)
+df.z = @. (df.ci_upper + df.ci_lower) / (df.ci_upper - df.ci_lower) * z̄
+@. @subset!(df, !ismissing(:z) && !isinf(:z))
+res = Optim.optimize(θ -> -sum(logpdf(GenT(exp(θ[1]), θ[2], exp(θ[3])),z) for z ∈ df.z), [5.,0,1])
+θ = res.minimizer
+(ν = exp(θ[1]), μ = θ[2], σ=exp(θ[3]))
+
+# same for Breznau et al. (2022), github.com/nbreznau/CRI
+df = DataFrame(CSV.File("data/Breznau et al. 2022/cri.csv"))
+@. @subset!(df, :z != "NA")
+df.z = parse.(Float64, df.z)
+hist(df.z)
+res = Optim.optimize(θ -> -sum(logpdf(GenT(exp(θ[1]), θ[2], exp(θ[3])),z) for z ∈ df.z), [5.,0,1])
+θ = res.minimizer
+(ν = exp(θ[1]), μ = θ[2], σ=exp(θ[3]))
