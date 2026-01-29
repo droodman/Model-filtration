@@ -9,6 +9,10 @@ const z̄ = quantile(𝒩, .975)  # 1.96
 
 @inline diffcdf(N,b,a) = cdf(N,b) - cdf(N,a)
 
+@inline Tcdf( d,x) = iszero(x) ? .5 :  cdf(d,x)  # the derivative of beta_inc() seems to be causing NaN from cdf(TDist()) when x = 0 
+@inline Tccdf(d,x) = iszero(x) ? .5 : ccdf(d,x)
+@inline logdiffTcdf(d,b,a) = iszero(b) ? log(.5 - cdf(d,a)) : iszero(a) ? log(cdf(d,b) - .5) : logdiffcdf(d,b,a)
+
 struct GenT{T<:Real} <: ContinuousUnivariateDistribution
 	ν::T; μ::T; σ::T
 
