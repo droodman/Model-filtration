@@ -154,9 +154,9 @@ function lnfZcondΩ(z, ω; modelabsz=false, NLegendre=50, pDFR, σ, ν, μₘ, �
 		logccdf_𝒩_COVₘ = logccdf(𝒩,COVₘ)
 		if -1e4 < COVₘ < 1e3
 			hrₖ = exp(logpdf(𝒩,COVₘ) - logccdf_𝒩_COVₘ)
-			loghr_exp = log(hrₖ * _σₘ_z₀[k] + μ̃ₘ + 1)
+			loghr_exp = log(hrₖ * _σₘ + μ̃ₘ + 1)
 		else
-			loghr_exp = log1p(_σₘ_z₀[k] / COVₘ)  # for COVₘ->-∞, hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1 -> 1 +_σₘ/COVₘ
+			loghr_exp = log1p(_σₘ / COVₘ)  # for COVₘ->-∞, hr(𝒩, COVₘ) * _σₘ + μ̃ₘ + 1 -> 1 +_σₘ/COVₘ
 		end
 
 		(_μₘ-1 + .5_σₘ^2 * lnI_H) * lnI_H + logccdf(𝒩, COVₘ) + loghr_exp
@@ -427,16 +427,19 @@ function _HnFll(M::HnFmodel; p::AbstractVector{T}, μ::AbstractVector{T}, τ::Ab
   logsumexp!(lnF_no_sig_phack, ∫), pF * F_insig, I₀  # sum across mixture components, into `lnF_no_sig_phack` because it's the right size and already allocated
 end
 
-# x=[1.5714281907573313, 1.465804041433003, 0.2970003852934048, -1.2345030648402224, -11.739232803873687, -18.878189435991363, -35.29114938546301, 43.16531402744249]
-# z=df.z[133:133]; wt=Float64[]; d=1; NLegendre=50; from::NamedTuple=NamedTuple(); xform::NamedTuple=NamedTuple()
+# # x =  [0.5714722027894039, 0.7520308170326785, -3.5911855949514453, -8.579727460729618, 1.972267289388311, 17.72105493292448, 0.696436657543165, 0.575699521216877]
+# x =  [0.5714801464221588, 0.7520707308980946, -3.5602353044185517, -2.476375237225013, 1.9721644545767822, 10.122174282269231, 0.6958548191454819, 0.5764905949709859]
+# d=1
+#  z=df.z[133:133]; wt=Float64[]; d=1; NLegendre=50; from::NamedTuple=NamedTuple(); xform::NamedTuple=NamedTuple()
 # 									methods::Vector=[BFGS()]; modelabsz=false
 # from = (p=fill(1/d,d), μ=[0.]     , τ=collect(LinRange(1,d,d)), pDFR=fill(1/3,3), σ=[1.]      , ν=[5.]      , μₘ=[0.]    , σₘ=[10.]     )
 # xform = (p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , pDFR=SimplextoRⁿ, σ=bcast(log), ν=bcast(log), μₘ=identity, σₘ=bcast(log))
-# M = HnFmodel(z, wt; d, modelabsz, NLegendre)
+# # M = HnFmodel(z, wt; d, modelabsz, NLegendre)
 # _from = pairs(from)
 # fromxform = [xform[p](v) for (p,v) ∈ _from]  # starting values in optimization parameter space
 # extractor = zip(keys(_from), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), fromxform, init=0))
 # xformer(θ) = (p=>inverse(xform[p])(θ[e]) for (p,e) ∈ extractor)  # map primary parameters into full model space, expressed as functions of optimization parameters, e.g. exp(log(σ))
+# collect(xformer(x))
 # objective(θ) = -HnFll(M; xformer(θ)...)
 # objective(θ)
 
@@ -589,12 +592,17 @@ function HnFfit(z::Vector, wt::Vector=Float64[]; d=1, NLegendre=50, from::NamedT
 	θ = vcat(fromxform...)
 
 	res = nothing
-	for method ∈ cycle(methods)
+	for method ∈ methods
 		println("Searching with $method algorithm")
 		res = Optim.optimize(objective, θ, method, Optim.Options(; merge((iterations=250, show_trace=true), kwargs)...); autodiff=:forward)
 		θ = Optim.minimizer(res)
-		Optim.converged(res) && break
 	end
+	# for method ∈ cycle(methods)
+	# 	println("Searching with $method algorithm")
+	# 	res = Optim.optimize(objective, θ, method, Optim.Options(; merge((iterations=250, show_trace=true), kwargs)...); autodiff=:forward)
+	# 	θ = Optim.minimizer(res)
+	# 	Optim.converged(res) && break
+	# end
 
 	invxform = θ -> [θ[e] |> inverse(xform[p]) for (p,e) ∈ extractor]
 	coefdict_maker(v) = NamedTuple(p=>inverse(xform[p])(v[e]) for (p,e) ∈ extractor)
@@ -903,8 +911,8 @@ f |> display
   penalty(; τ::Vector{T}, σ::Vector{T}, σₘ::Vector{T}, file_drawer_insig::T, kwargs...) where {T} = 
 		logpdf(Normal(0,50), log(σ[])) + 
 		logpdf(Normal(0,50), log(σₘ[])) + 
-		sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) +
-		logpdf(Beta(2,1),file_drawer_insig)
+		sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) #= +
+		logpdf(Beta(2,1),file_drawer_insig)=#
 
 	# Schuemie et al. (2013), https://onlinelibrary.wiley.com/action/downloadSupplement?doi=10.1002%2Fsim.5925&file=Appendix+G+Revision.xlsx
 	df = DataFrame(XLSX.readtable("data/Schuemie et al. 2013/appendix g revision.xlsx", "NeatTable", first_row=2, infer_eltypes=true)...)
@@ -919,7 +927,7 @@ f |> display
 	df.z = df.coefficient_num ./ df.standard_deviation_num
 	@. @subset!(df, lowercase(:main)=="yes" && !ismissing(:z) && abs(:z)<20)
 	disallowmissing!(df, :z)
-  SW = HnFestimate(df, :z, :weight_table; penalty, estname="SW")
+  SW = HnFestimate(df, :z, :weight_table; penalty, estname="SW", extended_trace=true)
 	HnFplot(df.z, SW, df.weight_table; title="Brodeur et al. (2016) data")
 
 	# Brodeur, Cook, and Heyes 2020, DOI 10.1257/aer.20190687, openicpsr.org/openicpsr/project/120246/version/V1/view?path=/openicpsr/120246/fcr:versions/V1/MM-Data.dta&type=file
