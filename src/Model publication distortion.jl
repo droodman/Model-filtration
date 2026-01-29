@@ -865,40 +865,40 @@ end
 #
 
 
-p = [.7,.3]
-μ = [0.7]
-τ = [1.2,2.7]
-pD = .4
-pF = .4
-pR = .2
-σ = [.7]
-ν = [5.]
-μₘ = [15.]
-σₘ = [10.]
-d = length(p)
-modelabsz = false
-pDFR = [pD, pF, pR]
-kwargs = (p=p, μ=μ, τ=τ, pDFR=pDFR, σ=σ, ν=ν, μₘ=μₘ, σₘ=σₘ, modelabsz=modelabsz)
+# p = [.7,.3]
+# μ = [0.7]
+# τ = [1.2,2.7]
+# pD = .4
+# pF = .4
+# pR = .2
+# σ = [.7]
+# ν = [5.]
+# μₘ = [15.]
+# σₘ = [10.]
+# d = length(p)
+# modelabsz = false
+# pDFR = [pD, pF, pR]
+# kwargs = (p=p, μ=μ, τ=τ, pDFR=pDFR, σ=σ, ν=ν, μₘ=μₘ, σₘ=σₘ, modelabsz=modelabsz)
 
-n = 100_000
-Random.seed!(1232)
-sim = HnFDGP(n; kwargs..., truncate=true)
+# n = 100_000
+# Random.seed!(1232)
+# sim = HnFDGP(n; kwargs..., truncate=true)
 
-f = Figure()
-Axis(f[1,1], limits=(modelabsz ? 0 : -10, 10, nothing,nothing))
-hist!(sim.z[abs.(sim.z).<100], bins=10*2*100, normalization=:pdf)
-zplot = (modelabsz ? 0 : -10):.01:10
-lines!(zplot, fZ(zplot; NLegendre=50, kwargs...), color=:orange, label="True model")
-f|>display
+# f = Figure()
+# Axis(f[1,1], limits=(modelabsz ? 0 : -10, 10, nothing,nothing))
+# hist!(sim.z[abs.(sim.z).<100], bins=10*2*100, normalization=:pdf)
+# zplot = (modelabsz ? 0 : -10):.01:10
+# lines!(zplot, fZ(zplot; NLegendre=50, kwargs...), color=:orange, label="True model")
+# f|>display
 
-res = HnFfit(sim.z; d, modelabsz, NLegendre=50, estname="simulated", extended_trace=false)  # penalized maximum likelihood
-print(res.coefdict)
-lines!(zplot, fZ(zplot; modelabsz, res.coefdict...), color=:blue, label="Fitted model")
+# res = HnFfit(sim.z; d, modelabsz, NLegendre=50, estname="simulated", extended_trace=false)  # penalized maximum likelihood
+# print(res.coefdict)
+# lines!(zplot, fZ(zplot; modelabsz, res.coefdict...), color=:blue, label="Fitted model")
 
-f[0,:] = Label(f, "Simulation vs model")
-axislegend(position=:lt, framevisible=false)
-colsize!(f.layout, 1, Relative(1))
-f |> display
+# f[0,:] = Label(f, "Simulation vs model")
+# axislegend(position=:lt, framevisible=false)
+# colsize!(f.layout, 1, Relative(1))
+# f |> display
 
 
 #
