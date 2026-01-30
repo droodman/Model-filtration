@@ -29,9 +29,10 @@ import SpecialFunctions.beta_inc
 
 
 using SpecialFunctions, ChainRulesCore
-@inline function _Kfun(x::T, p::T, q::T, logbetapq::T) where {T}
+@inline function _Kfun(logx::T, log1mx::T, p::T, q::T, logbetapq::T) where {T}
     # K(x;p,q) = x^p (1-x)^{q-1} / (p * B(p,q)) computed in log-space for stability
-    return exp(p * log(x) + (q - 1) * log1p(-x) - log(p) - logbetapq)
+    # logx = log(x), log1mx = log(1-x), precomputed
+    return exp(p * logx + (q - 1) * log1mx - log(p) - logbetapq)
 end
 
 @inline function _ffun(x::T, p::T, q::T) where {T}
@@ -62,22 +63,25 @@ end
     return x / y
 end
 
-@inline function _dK_dp(x::T, p::T, q::T, K::T, ψpq::T, ψp::T) where {T} 
+@inline function _dK_dp(logx::T, p::T, K::T, ψpq::T, ψp::T) where {T}
     # ∂K/∂p using digamma identities: d/dp log B(p,q) = ψ(p) - ψ(p+q)
-    return K * (log(x) - inv(p) + ψpq - ψp)
+    # logx = log(x), precomputed
+    return K * (logx - inv(p) + ψpq - ψp)
 end
 
-@inline function _dK_dq(x::T, p::T, q::T, K::T, ψpq::T, ψq::T) where {T} 
+@inline function _dK_dq(log1mx::T, K::T, ψpq::T, ψq::T) where {T}
     # ∂K/∂q using identical pattern
-    K * (log1p(-x) + ψpq - ψq)
+    # log1mx = log(1-x), precomputed
+    K * (log1mx + ψpq - ψq)
 end
 
-@inline function _dK_dpdq(x::T, p::T, q::T, logbetapq::T) where {T}
+@inline function _dK_dpdq(logx::T, log1mx::T, p::T, q::T, logbetapq::T) where {T}
     # Convenience: compute (∂K/∂p, ∂K/∂q) together with shared ψ(p+q)
+    # logx = log(x), log1mx = log(1-x), precomputed
     ψ = digamma(p + q)
-    Kf = _Kfun(x, p, q, logbetapq)
-    dKdp = _dK_dp(x, p, q, Kf, ψ, digamma(p))
-    dKdq = _dK_dq(x, p, q, Kf, ψ, digamma(q))
+    Kf = _Kfun(logx, log1mx, p, q, logbetapq)
+    dKdp = _dK_dp(logx, p, Kf, ψ, digamma(p))
+    dKdq = _dK_dq(log1mx, Kf, ψ, digamma(q))
     return dKdp, dKdq
 end
 
@@ -86,12 +90,10 @@ end
     return - _a1fun(p, q, f) / (p + 1)
 end
 
-@inline function _dan_dp(p::T, q::T, f::T, n::Int, pfq2::T, da1_dp::T) where {T}
+@inline function _dan_dp(p::T, q::T, n::Int, an::T, da1_dp::T) where {T}
     # ∂a_n/∂p via log-derivative: d a_n = a_n * d log a_n; for n=1, uses precomputed ∂a₁/∂p
-    if n == 1
-        return da1_dp
-    end
-    an = _anfun(p, q, f, n, pfq2)
+    # an is passed in from _nextapp to avoid redundant computation
+    n == 1 && return da1_dp
     dlog = inv(p + q + n - 2) + inv(p + n - 1) - inv(p + 2*n - 3) - 2 * inv(p + 2*n - 2) - inv(p + 2*n - 1)
     return an * dlog
 end
@@ -181,24 +183,33 @@ function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T
 
     logbetapq = logbeta(a,b)  # Time-consuming step; symetric in a,b
 
-    # 3) Non-boundary path: precompute ∂I/∂x at original (a,b,x) via stable log form
-    dx = exp((a - oneT) * log(x) + (b - oneT) * log1p(-x) - logbetapq)
+    # 3) Precompute log(x) and log(1-x) once at original x
+    logx   = log(x)
+    log1mx = log1p(-x)
+
+    # 3a) Non-boundary path: precompute ∂I/∂x at original (a,b,x) via stable log form
+    dx = exp((a - oneT) * logx + (b - oneT) * log1mx - logbetapq)
 
     # 4) Optional tail-swap for symmetry and improved CF convergence:
     #    if x > a/(a+b), evaluate at (p,q,x₀) = (b,a,1-x) and swap back at the end.
     p    = a
     q    = b
-    x₀   = x
     swap = x > a / (a + b)
     if swap
-        x₀   = oneT - x
-        p    = b
-        q    = a
+        x₀      = oneT - x
+        p       = b
+        q       = a
+        logx₀   = log1mx    # log(1-x) = log(x₀)
+        log1mx₀ = logx      # log(1-(1-x)) = log(x)
+    else
+        x₀      = x
+        logx₀   = logx
+        log1mx₀ = log1mx
     end
 
     # 5) Initialize CF state and derivatives
-    K                    = _Kfun(x₀, p, q, logbetapq)
-    dK_dp_val, dK_dq_val = _dK_dpdq(x₀, p, q, logbetapq)
+    K                    = _Kfun(logx₀, log1mx₀, p, q, logbetapq)
+    dK_dp_val, dK_dq_val = _dK_dpdq(logx₀, log1mx₀, p, q, logbetapq)
     f                    = _ffun(x₀, p, q)
 
     # 5a) Precompute loop-invariant expressions (only depend on p, q, f)
@@ -241,7 +252,7 @@ function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T
 
         # Update continuants.
         An, Bn, an, bn = _nextapp(f, p, q, n, App, Ap, Bpp, Bp, pfq2, pf_2q, pq_p2pf)
-        dan            = _dan_dp(p, q, f, n, pfq2, da1_dp)
+        dan            = _dan_dp(p, q, n, an, da1_dp)
         dbn            = _dbn_dp(p, q, n, pf_2q, pq_p2pf, pqf)
         dAn_dp         = _dnextapp(an, bn, dan, dbn, App, Ap, dApp_dp, dAp_dp)
         dBn_dp         = _dnextapp(an, bn, dan, dbn, Bpp, Bp, dBpp_dp, dBp_dp)
@@ -434,17 +445,26 @@ function ChainRulesCore.rrule(::typeof(beta_inc_inv), a::Number, b::Number, p::N
 end
 
 
-# a=3.7; b=1.2; x=.3; @btime _beta_inc_grad($a,$b,$x)
+aa=3.7; bb=1.2; xx=.3; @btime _beta_inc_grad($aa,$bb,$xx)
 
-# d=1
-# __from  = (p=fill(1/d,d), μ=[0.]     , τ=collect(LinRange(1,d,d)), pDFR=fill(1/3,3), σ=[1.]      , ν=[5.]      , μₘ=[0.]    , σₘ=[10.]     )
-# __xform = (p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , pDFR=SimplextoRⁿ, σ=bcast(log), ν=bcast(log), μₘ=identity, σₘ=bcast(log))
-# __M = HnFmodel(df.z; d, penalty)
-# ___from = pairs(__from)
-# __fromxform = [__xform[p](v) for (p,v) ∈ ___from]  # starting values in optimization parameter space
-# __extractor = zip(keys(___from), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), __fromxform, init=0))
-# __xformer(x) = (p=>inverse(__xform[p])(x[e]) for (p,e) ∈ __extractor)  # map primary parameters into full model space, expressed as functions of optimization parameters, e.g. exp(log(σ))
-# __objective(x) = -HnFll(__M; __xformer(x)...)
-# __θ = vcat(__fromxform...)
-# [__objective(__θ); ForwardDiff.gradient(__objective, __θ)] - [43366.60740962447, -4080.292638304726, -5061.240886317648, -2333.889966771348, 3059.97435335951, -17562.96774747974, 13275.063164555424, -566.0593935293476, -4654.085929173036]
+df = DataFrame(XLSX.readtable("data/Schuemie et al. 2013/appendix g revision.xlsx", "NeatTable", first_row=2, infer_eltypes=true)...)
+@. df.z = log(df."Effect estimate") / (log(df."Upper bound of 95% CI" / df."Lower bound of 95% CI") / 2z̄)
+@. @subset!(df, abs(:z)<20)
+disallowmissing!(df, :z)
+
+__penalty(; τ::Vector{T}, σ::Vector{T}, σₘ::Vector{T}, file_drawer_insig::T, kwargs...) where {T} = 
+    logpdf(Normal(0,50), log(σ[])) + 
+    logpdf(Normal(0,50), log(σₘ[])) + 
+    sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ)
+__d=1
+__from  = (p=fill(1/__d,__d), μ=[0.]     , τ=collect(LinRange(1,__d,__d)), pDFR=fill(1/3,3), σ=[1.]      , ν=[5.]      , μₘ=[0.]    , σₘ=[10.]     )
+__xform = (p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , pDFR=SimplextoRⁿ, σ=bcast(log), ν=bcast(log), μₘ=identity, σₘ=bcast(log))
+__M = HnFmodel(df.z; d=__d, penalty=__penalty)
+___from = pairs(__from)
+__fromxform = [__xform[p](v) for (p,v) ∈ ___from]  # starting values in optimization parameter space
+__extractor = zip(keys(___from), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), __fromxform, init=0))
+__xformer(x) = (p=>inverse(__xform[p])(x[e]) for (p,e) ∈ __extractor)  # map primary parameters into full model space, expressed as functions of optimization parameters, e.g. exp(log(σ))
+__objective(x) = -HnFll(__M; __xformer(x)...)
+__θ = vcat(__fromxform...)
+[__objective(__θ); ForwardDiff.gradient(__objective, __θ)] - [43366.60740962447, -4080.292638304726, -5061.240886317648, -2333.889966771348, 3059.97435335951, -17562.96774747974, 9314.187099419918, -566.0593935293476, -4654.085929173036]
 
