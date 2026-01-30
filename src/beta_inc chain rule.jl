@@ -45,11 +45,10 @@ end
     return p * f * (q - 1) / (q * (p + 1))
 end
 
-@inline function _anfun(p::T, q::T, f::T, n::Int, pfq2::T) where {T}
+@inline function _anfun(p::T, q::T, n::Int, pfq2::T) where {T}
     # a_n coefficient (n ≥ 1) of the continued fraction for ₂F₁ in terms of p=a, q=b, f.
     # For n=1, falls back to a₁; for n≥2 uses the closed-form product from the Gauss CF.
     # pfq2 = (p * f / q)^2, precomputed for efficiency
-    n == 1 && return _a1fun(p, q, f)
     pn = p + n
     p2n = pn + n
     return pfq2 * (n - 1) * (pn + q - 2) * (pn - 1) * (q - n) / ((p2n - 3) * (p2n - 2)^2 * (p2n - 1))
@@ -93,7 +92,6 @@ end
 @inline function _dan_dp(p::T, q::T, n::Int, an::T, da1_dp::T) where {T}
     # ∂a_n/∂p via log-derivative: d a_n = a_n * d log a_n; for n=1, uses precomputed ∂a₁/∂p
     # an is passed in from _nextapp to avoid redundant computation
-    n == 1 && return da1_dp
     dlog = inv(p + q + n - 2) + inv(p + n - 1) - inv(p + 2*n - 3) - 2 * inv(p + 2*n - 2) - inv(p + 2*n - 1)
     return an * dlog
 end
@@ -108,23 +106,24 @@ end
     # ∂a_n/∂q avoiding the removable singularity at q ≈ n for integer q.
     # For n=1, returns precomputed ∂a₁/∂q.
     # pfq2 = (p * f / q)^2, p2q2 = p + 2*q - 2, da1_dq = a1 / (q - 1)
-    if n == 1
-        return da1_dq
-    end
-    # Use the simplified closed-form of a_n that eliminates explicit q^2 via f:
+
+    # Uses the simplified closed-form of a_n that eliminates explicit q^2 via f:
     #   a_n = (x/(1-x))^2 * (n-1) * (p+n-1) * (p+q+n-2) * (q-n) / D(p,n)
     # where D(p,n) = (p+2n-3)*(p+2n-2)^2*(p+2n-1) and (x/(1-x)) = p*f/q.
     # Differentiate only the q-dependent factor G(q) = (p+q+n-2)*(q-n):
     #   dG/dq = (q-n) + (p+q+n-2) = p + 2q - 2.
-
     C = pfq2 * (n - 1) * (p + n - 1) /
         ((p + 2*n - 3) * (p + 2*n - 2)^2 * (p + 2*n - 1))
     return C * p2q2
 end
 
+# n == 1 instance
+# @inline _db1_dp(p::T, q::T, pfq::T) where {T} = pfq*(q-2)/(p+2)^2
+
 @inline function _dbn_dp(p::T, q::T, n::Int, pf_2q::T, pq_p2pf::T, pqf::T) where {T}
     # ∂b_n/∂p via quotient rule on b_n = N/D.
     # pf_2q = p * f + 2 * q, pq_p2pf = p * q * (p - 2 - p * f), pqf = p * q * f
+
     A = 2 * n^2 + 2 * (p - 1) * n
     N1 = pf_2q * A
     N = N1 + pq_p2pf
@@ -140,6 +139,7 @@ end
     # ∂b_n/∂q similarly via quotient rule
     # pf_2q = p * f + 2 * q, pq_p2pf = p * q * (p - 2 - p * f), p_2_pf = p - 2 - p * f
     # p2f = p^2 * f, pfq_2 = p * (f / q) + 2
+
     A = 2 * n^2 + 2 * (p - 1) * n
     N1 = pf_2q * A
     N = N1 + pq_p2pf
@@ -151,12 +151,23 @@ end
     return (dN_dq * D - N * dD_dq) / (D^2)
 end
 
-@inline function _nextapp(f::T, p::T, q::T, n::Int, App::T, Ap::T, Bpp::T, Bp::T,
+# n=1 case
+@inline function _nextapp1(f::T, p::T, q::T) where {T}
+    # One step of the continuant recurrences:
+    #   A_n = a_n A_{n-2} + b_n A_{n-1}
+    #   B_n = a_n B_{n-2} + b_n B_{n-1}
+    an = p * f * (q - 1) / (q * (p + 1))
+    bn = (2p*f / q + 2 + p * (1 - f)) / (p + 2)
+    An = an + bn
+    return An, an, bn
+end
+
+@inline function _nextapp(p::T, q::T, n::Int, App::T, Ap::T, Bpp::T, Bp::T,
                          pfq2::T, pf_2q::T, pq_p2pf::T) where {T}
     # One step of the continuant recurrences:
     #   A_n = a_n A_{n-2} + b_n A_{n-1}
     #   B_n = a_n B_{n-2} + b_n B_{n-1}
-    an = _anfun(p, q, f, n, pfq2)
+    an = _anfun(p, q, n, pfq2)
     bn = _bnfun(p, q, n, pf_2q, pq_p2pf)
     An = an * App + bn * Ap
     Bn = an * Bpp + bn * Bp
@@ -168,7 +179,7 @@ end
     return dan * Xpp + an * dXpp + dbn * Xp + bn * dXp
 end
 
-function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T=eps(T)*T(1e4)) where {T}
+function _beta_inc_grad(a::T, b::T, x::T, maxapp::Int=200, minapp::Int=3, err::T=eps(T)*T(1e4)) where {T}
     # Compute I_x(a,b) and partial derivatives (∂I/∂a, ∂I/∂b, ∂I/∂x)
     # using a differentiated continued fraction with convergence control.
     oneT = one(T)
@@ -225,41 +236,60 @@ function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T
     p2q2    = p + 2*q - 2               # p + 2*q - 2
     a1      = _a1fun(p, q, f)           # a₁ coefficient
     da1_dp  = -a1 / (p + 1)             # ∂a₁/∂p
-    da1_dq  = a1 / (q - 1)              # ∂a₁/∂q
+    da1_dq  =  a1 / (q - 1)              # ∂a₁/∂q
 
-    App                  = oneT
-    Ap                   = oneT
-    Bpp                  = zeroT
-    Bp                   = oneT
-    dApp_dp              = zeroT
-    dBpp_dp              = zeroT
-    dAp_dp               = zeroT
-    dBp_dp               = zeroT
-    dApp_dq              = zeroT
-    dBpp_dq              = zeroT
-    dAp_dq               = zeroT
-    dBp_dq               = zeroT
-    dI_dp                = T(NaN)
-    dI_dq                = T(NaN)
-    Ixpq                 = T(NaN)
-    Ixpqn                = T(NaN)
-    dI_dp_prev           = T(NaN)
-    dI_dq_prev           = T(NaN)
+    
+    # Update continuants.
+    An, an, Bn = _nextapp1(f, p, q)
+    dBn_dq     = -pfq / (p+2)  # _dbn_dq(p, q, n, pf_2q, pq_p2pf, p_2_pf, p2f, pfq_2)
+    dBn_dp     = dBn_dq * (2-q) / (p+2)  # _db1_dp(p, q, pfq)
+    dAn_dp     = da1_dp + dBn_dp
+    dAn_dq     = da1_dq + dBn_dq
 
-    # 6) Main CF loop (n from 1): update continuants, scale, form current approximant Cn=A_n/B_n
+    # Form current approximant Cn=A_n/B_n and its derivatives.
+    # Guard against tiny/zero Bn to avoid NaNs/Inf in divisions.
+    tiny   = sqrt(eps(T))
+
+    invBn  = (Bn > tiny || Bn < -tiny) && isfinite(Bn) ? inv(Bn) : inv(sign(Bn) * tiny)
+    Cn     = An * invBn
+    invBn2 = invBn * invBn
+    dI_dp  = dK_dp_val * Cn + K * (invBn * dAn_dp - (An * invBn2) * dBn_dp)
+    dI_dq  = dK_dq_val * Cn + K * (invBn * dAn_dq - (An * invBn2) * dBn_dq)
+    Ixpqn  = K * Cn
+    Ixpq       = Ixpqn
+    dI_dp_prev = dI_dp
+    dI_dq_prev = dI_dq
+
+    # Shift CF state for next iteration
+    App      = oneT
+    Bpp      = oneT
+    Ap       = An
+    Bp       = Bn
+    dApp_dp  = zeroT
+    dApp_dq  = zeroT
+    dBpp_dp  = zeroT
+    dBpp_dq  = zeroT
+    dAp_dp   = dAn_dp
+    dAp_dq   = dAn_dq
+    dBp_dp   = dBn_dp
+    dBp_dq   = dBn_dq
+
+    # 6) Main CF loop (n from 2): update continuants, scale, form current approximant Cn=A_n/B_n
     #    and its derivatives to update I and ∂I/∂(p,q). Stop on relative convergence of all.
-    for n=1:maxapp
+    for n=2:maxapp
 
         # Update continuants.
-        An, Bn, an, bn = _nextapp(f, p, q, n, App, Ap, Bpp, Bp, pfq2, pf_2q, pq_p2pf)
-        dan            = _dan_dp(p, q, n, an, da1_dp)
-        dbn            = _dbn_dp(p, q, n, pf_2q, pq_p2pf, pqf)
-        dAn_dp         = _dnextapp(an, bn, dan, dbn, App, Ap, dApp_dp, dAp_dp)
-        dBn_dp         = _dnextapp(an, bn, dan, dbn, Bpp, Bp, dBpp_dp, dBp_dp)
-        dan            = _dan_dq(p, q, n, pfq2, p2q2, da1_dq)
-        dbn            = _dbn_dq(p, q, n, pf_2q, pq_p2pf, p_2_pf, p2f, pfq_2)
-        dAn_dq         = _dnextapp(an, bn, dan, dbn, App, Ap, dApp_dq, dAp_dq)
-        dBn_dq         = _dnextapp(an, bn, dan, dbn, Bpp, Bp, dBpp_dq, dBp_dq)
+        An, Bn, an, bn = _nextapp(p, q, n, App, Ap, Bpp, Bp, pfq2, pf_2q, pq_p2pf)
+
+        dan_p          = _dan_dp(p, q, n, an, da1_dp)
+        dbn_p          = _dbn_dp(p, q, n, pf_2q, pq_p2pf, pqf)
+        dAn_dp         = _dnextapp(an, bn, dan_p, dbn_p, App, Ap, dApp_dp, dAp_dp)
+        dBn_dp         = _dnextapp(an, bn, dan_p, dbn_p, Bpp, Bp, dBpp_dp, dBp_dp)
+
+        dan_q          = _dan_dq(p, q, n, pfq2, p2q2, da1_dq)
+        dbn_q          = _dbn_dq(p, q, n, pf_2q, pq_p2pf, p_2_pf, p2f, pfq_2)
+        dAn_dq         = _dnextapp(an, bn, dan_q, dbn_q, App, Ap, dApp_dq, dAp_dq)
+        dBn_dq         = _dnextapp(an, bn, dan_q, dbn_q, Bpp, Bp, dBpp_dq, dBp_dq)
 
         # Normalize states to control growth/underflow (scale-invariant transform)
         s = maximum((abs(An), abs(Bn), abs(Ap), abs(Bp), abs(App), abs(Bpp)))
@@ -287,15 +317,11 @@ function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T
 
         # Form current approximant Cn=A_n/B_n and its derivatives.
         # Guard against tiny/zero Bn to avoid NaNs/Inf in divisions.
-        tiny   = sqrt(eps(T))
 
-        absBn  = abs(Bn)
-        sgnBn  = ifelse(Bn >= zeroT, oneT, -oneT)
-        invBn  = absBn > tiny && isfinite(absBn) ? inv(Bn) : inv(sgnBn * tiny)
+        invBn  = (Bn > tiny || Bn < -tiny) && isfinite(Bn) ? inv(Bn) : inv(sign(Bn) * tiny)
         Cn     = An * invBn
-        invBn2 = invBn * invBn
-        dI_dp  = dK_dp_val * Cn + K * (invBn * dAn_dp - (An * invBn2) * dBn_dp)
-        dI_dq  = dK_dq_val * Cn + K * (invBn * dAn_dq - (An * invBn2) * dBn_dq)
+        dI_dp  = dK_dp_val * Cn + K * (dAn_dp - (An * invBn) * dBn_dp) * invBn
+        dI_dq  = dK_dq_val * Cn + K * (dAn_dq - (An * invBn) * dBn_dq) * invBn
         Ixpqn  = K * Cn
 
         # Decide convergence: 
@@ -304,12 +330,10 @@ function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T
             denomI = max(abs(Ixpqn), abs(Ixpq), eps(T))
             denomp = max(abs(dI_dp), abs(dI_dp_prev), eps(T))
             denomq = max(abs(dI_dq), abs(dI_dq_prev), eps(T))
-            rI     = abs(Ixpqn - Ixpq) / denomI
-            rp     = abs(dI_dp - dI_dp_prev) / denomp
-            rq     = abs(dI_dq - dI_dq_prev) / denomq
-            if max(rI, rp, rq) < ϵ
-                break
-            end
+            rI     = (Ixpqn - Ixpq) / denomI
+            rp     = (dI_dp - dI_dp_prev) / denomp
+            rq     = (dI_dq - dI_dq_prev) / denomq
+            -ϵ<rI<ϵ && -ϵ<rp<ϵ && -ϵ<rq<ϵ && break
         end
         Ixpq       = Ixpqn
         dI_dp_prev = dI_dp
@@ -452,19 +476,19 @@ df = DataFrame(XLSX.readtable("data/Schuemie et al. 2013/appendix g revision.xls
 @. @subset!(df, abs(:z)<20)
 disallowmissing!(df, :z)
 
-__penalty(; τ::Vector{T}, σ::Vector{T}, σₘ::Vector{T}, file_drawer_insig::T, kwargs...) where {T} = 
-    logpdf(Normal(0,50), log(σ[])) + 
-    logpdf(Normal(0,50), log(σₘ[])) + 
-    sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ)
-__d=1
-__from  = (p=fill(1/__d,__d), μ=[0.]     , τ=collect(LinRange(1,__d,__d)), pDFR=fill(1/3,3), σ=[1.]      , ν=[5.]      , μₘ=[0.]    , σₘ=[10.]     )
-__xform = (p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , pDFR=SimplextoRⁿ, σ=bcast(log), ν=bcast(log), μₘ=identity, σₘ=bcast(log))
-__M = HnFmodel(df.z; d=__d, penalty=__penalty)
-___from = pairs(__from)
-__fromxform = [__xform[p](v) for (p,v) ∈ ___from]  # starting values in optimization parameter space
-__extractor = zip(keys(___from), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), __fromxform, init=0))
-__xformer(x) = (p=>inverse(__xform[p])(x[e]) for (p,e) ∈ __extractor)  # map primary parameters into full model space, expressed as functions of optimization parameters, e.g. exp(log(σ))
-__objective(x) = -HnFll(__M; __xformer(x)...)
-__θ = vcat(__fromxform...)
-[__objective(__θ); ForwardDiff.gradient(__objective, __θ)] - [43366.60740962447, -4080.292638304726, -5061.240886317648, -2333.889966771348, 3059.97435335951, -17562.96774747974, 9314.187099419918, -566.0593935293476, -4654.085929173036]
+# __penalty(; τ::Vector{T}, σ::Vector{T}, σₘ::Vector{T}, file_drawer_insig::T, kwargs...) where {T} = 
+#     logpdf(Normal(0,50), log(σ[])) + 
+#     logpdf(Normal(0,50), log(σₘ[])) + 
+#     sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ)
+# __d=1
+# __from  = (p=fill(1/__d,__d), μ=[0.]     , τ=collect(LinRange(1,__d,__d)), pDFR=fill(1/3,3), σ=[1.]      , ν=[5.]      , μₘ=[0.]    , σₘ=[10.]     )
+# __xform = (p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , pDFR=SimplextoRⁿ, σ=bcast(log), ν=bcast(log), μₘ=identity, σₘ=bcast(log))
+# __M = HnFmodel(df.z; d=__d, penalty=__penalty)
+# ___from = pairs(__from)
+# __fromxform = [__xform[p](v) for (p,v) ∈ ___from]  # starting values in optimization parameter space
+# __extractor = zip(keys(___from), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), __fromxform, init=0))
+# __xformer(x) = (p=>inverse(__xform[p])(x[e]) for (p,e) ∈ __extractor)  # map primary parameters into full model space, expressed as functions of optimization parameters, e.g. exp(log(σ))
+# __objective(x) = -HnFll(__M; __xformer(x)...)
+# __θ = vcat(__fromxform...)
+# [__objective(__θ); ForwardDiff.gradient(__objective, __θ)] - [43366.60740962447, -4080.292638304726, -5061.240886317648, -2333.889966771348, 3059.97435335951, -17562.96774747974, 9314.187099419918, -566.0593935293476, -4654.085929173036]
 
