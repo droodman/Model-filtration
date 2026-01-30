@@ -154,7 +154,7 @@ end
     return dan * Xpp + an * dXpp + dbn * Xp + bn * dXp
 end
 
-function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T=1e-12 #=eps(T)*T(1e4)=#) where {T<:Real}
+function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T=eps(T)*T(1e4)) where {T<:Real}
     # Compute I_x(a,b) and partial derivatives (∂I/∂a, ∂I/∂b, ∂I/∂x)
     # using a differentiated continued fraction with convergence control.
     oneT = one(T)
@@ -173,7 +173,7 @@ function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T
     q  = b
     x₀ = x
     swap = x > a / (a + b)
-    swap && (x₀. p, q = oneT - x, b, a)
+    swap && (x₀, p, q = oneT-x, b, a)
 
     # 5) Initialize CF state and derivatives
     K                    = _Kfun(x₀, p, q)
@@ -446,4 +446,4 @@ end
 # using Distributions
 # ForwardDiff.hessian(x-> cdf(TDist(x[]),1.3), [3.4])
 
-a=3.7; b=1.2; x=.3; @btime _beta_inc_grad($a,$b,$x)
+# a=3.7; b=1.2; x=.3; @btime _beta_inc_grad($a,$b,$x)

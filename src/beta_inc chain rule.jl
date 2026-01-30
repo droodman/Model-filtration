@@ -29,9 +29,9 @@ import SpecialFunctions.beta_inc
 
 
 using SpecialFunctions, ChainRulesCore
-@inline function _Kfun(x::T, p::T, q::T) where {T}
+@inline function _Kfun(x::T, p::T, q::T, logbetapq::T) where {T}
     # K(x;p,q) = x^p (1-x)^{q-1} / (p * B(p,q)) computed in log-space for stability
-    return exp(p * log(x) + (q - 1) * log1p(-x) - log(p) - logbeta(p, q))
+    return exp(p * log(x) + (q - 1) * log1p(-x) - log(p) - logbetapq)
 end
 
 @inline function _ffun(x::T, p::T, q::T) where {T}
@@ -44,19 +44,20 @@ end
     return p * f * (q - 1) / (q * (p + 1))
 end
 
-@inline function _anfun(p::T, q::T, f::T, n::Int) where {T}
+@inline function _anfun(p::T, q::T, f::T, n::Int, pfq2::T) where {T}
     # a_n coefficient (n ≥ 1) of the continued fraction for ₂F₁ in terms of p=a, q=b, f.
     # For n=1, falls back to a₁; for n≥2 uses the closed-form product from the Gauss CF.
+    # pfq2 = (p * f / q)^2, precomputed for efficiency
     n == 1 && return _a1fun(p, q, f)
-    r = (p * f / q)^2
     pn = p + n
     p2n = pn + n
-    return r * (n - 1) * (pn + q - 2) * (pn - 1) * (q - n) / ((p2n - 3) * (p2n - 2)^2 * (p2n - 1))
+    return pfq2 * (n - 1) * (pn + q - 2) * (pn - 1) * (q - n) / ((p2n - 3) * (p2n - 2)^2 * (p2n - 1))
 end
 
-@inline function _bnfun(p::T, q::T, f::T, n::Int) where {T}
+@inline function _bnfun(p::T, q::T, n::Int, pf_2q::T, pq_p2pf::T) where {T}
     # b_n coefficient (n ≥ 1) of the continued fraction. Derived for the same CF.
-    x = 2 * n * (p * f + 2 * q) * (n + p - 1) + p * q * (p - 2 - p * f)
+    # pf_2q = p * f + 2 * q, pq_p2pf = p * q * (p - 2 - p * f)
+    x = 2 * n * pf_2q * (n + p - 1) + pq_p2pf
     y = q * (p + 2*n - 2) * (p + 2*n)
     return x / y
 end
@@ -71,10 +72,10 @@ end
     K * (log1p(-x) + ψpq - ψq)
 end
 
-@inline function _dK_dpdq(x::T, p::T, q::T) where {T}
+@inline function _dK_dpdq(x::T, p::T, q::T, logbetapq::T) where {T}
     # Convenience: compute (∂K/∂p, ∂K/∂q) together with shared ψ(p+q)
     ψ = digamma(p + q)
-    Kf = _Kfun(x, p, q)
+    Kf = _Kfun(x, p, q, logbetapq)
     dKdp = _dK_dp(x, p, q, Kf, ψ, digamma(p))
     dKdq = _dK_dq(x, p, q, Kf, ψ, digamma(q))
     return dKdp, dKdq
@@ -85,12 +86,12 @@ end
     return - _a1fun(p, q, f) / (p + 1)
 end
 
-@inline function _dan_dp(p::T, q::T, f::T, n::Int) where {T}
-    # ∂a_n/∂p via log-derivative: d a_n = a_n * d log a_n; for n=1, uses ∂a₁/∂p
+@inline function _dan_dp(p::T, q::T, f::T, n::Int, pfq2::T, da1_dp::T) where {T}
+    # ∂a_n/∂p via log-derivative: d a_n = a_n * d log a_n; for n=1, uses precomputed ∂a₁/∂p
     if n == 1
-        return _da1_dp(p, q, f)
+        return da1_dp
     end
-    an = _anfun(p, q, f, n)
+    an = _anfun(p, q, f, n, pfq2)
     dlog = inv(p + q + n - 2) + inv(p + n - 1) - inv(p + 2*n - 3) - 2 * inv(p + 2*n - 2) - inv(p + 2*n - 1)
     return an * dlog
 end
@@ -101,11 +102,12 @@ end
 end
 
 
-@inline function _dan_dq(p::T, q::T, f::T, n::Int) where {T}
+@inline function _dan_dq(p::T, q::T, n::Int, pfq2::T, p2q2::T, da1_dq::T) where {T}
     # ∂a_n/∂q avoiding the removable singularity at q ≈ n for integer q.
-    # For n=1, defer to the specific a₁ derivative.
+    # For n=1, returns precomputed ∂a₁/∂q.
+    # pfq2 = (p * f / q)^2, p2q2 = p + 2*q - 2, da1_dq = a1 / (q - 1)
     if n == 1
-        return _da1_dq(p, q, f)
+        return da1_dq
     end
     # Use the simplified closed-form of a_n that eliminates explicit q^2 via f:
     #   a_n = (x/(1-x))^2 * (n-1) * (p+n-1) * (p+q+n-2) * (q-n) / D(p,n)
@@ -113,54 +115,47 @@ end
     # Differentiate only the q-dependent factor G(q) = (p+q+n-2)*(q-n):
     #   dG/dq = (q-n) + (p+q+n-2) = p + 2q - 2.
 
-    # This is equivalent to  
-    #   return _anfun(p,q,f,n) * (inv(p+q+n-2) + inv(q-n))
-    # but more precise.
-
-    pfq = (p * f) / q
-    C   = (pfq * pfq) * (n - 1) * (p + n - 1) /
-          ((p + 2*n - 3) * (p + 2*n - 2)^2 * (p + 2*n - 1))
-    return C * (p + 2*q - 2)
+    C = pfq2 * (n - 1) * (p + n - 1) /
+        ((p + 2*n - 3) * (p + 2*n - 2)^2 * (p + 2*n - 1))
+    return C * p2q2
 end
 
-@inline function _dbn_dp(p::T, q::T, f::T, n::Int) where {T}
+@inline function _dbn_dp(p::T, q::T, n::Int, pf_2q::T, pq_p2pf::T, pqf::T) where {T}
     # ∂b_n/∂p via quotient rule on b_n = N/D.
-    # Note the internal dependence f(p,q)=q x/(p(1-x)) — terms cancel in N as per derivation.
-    g = p * f + 2 * q
+    # pf_2q = p * f + 2 * q, pq_p2pf = p * q * (p - 2 - p * f), pqf = p * q * f
     A = 2 * n^2 + 2 * (p - 1) * n
-    N1 = g * A
-    N2 = p * q * (p - 2 - p * f)
-    N = N1 + N2
+    N1 = pf_2q * A
+    N = N1 + pq_p2pf
     D = q * (p + 2*n - 2) * (p + 2*n)
-    dN1_dp = 2 * n * g
-    dN2_dp = q * (2 * p - 2) - p * q * f
+    dN1_dp = 2 * n * pf_2q
+    dN2_dp = q * (2 * p - 2) - pqf
     dN_dp = dN1_dp + dN2_dp
     dD_dp = q * (2 * p + 4 * n - 2)
     return (dN_dp * D - N * dD_dp) / (D^2)
 end
 
-@inline function _dbn_dq(p::T, q::T, f::T, n::Int) where {T}
+@inline function _dbn_dq(p::T, q::T, n::Int, pf_2q::T, pq_p2pf::T, p_2_pf::T, p2f::T, pfq_2::T) where {T}
     # ∂b_n/∂q similarly via quotient rule
-    g = p * f + 2 * q
+    # pf_2q = p * f + 2 * q, pq_p2pf = p * q * (p - 2 - p * f), p_2_pf = p - 2 - p * f
+    # p2f = p^2 * f, pfq_2 = p * (f / q) + 2
     A = 2 * n^2 + 2 * (p - 1) * n
-    N1 = g * A
-    N2 = p * q * (p - 2 - p * f)
-    N = N1 + N2
+    N1 = pf_2q * A
+    N = N1 + pq_p2pf
     D = q * (p + 2*n - 2) * (p + 2*n)
-    g_q = p * (f / q) + 2
-    dN1_dq = g_q * A
-    dN2_dq = p * (p - 2 - p * f) - p^2 * f
+    dN1_dq = pfq_2 * A
+    dN2_dq = p * p_2_pf - p2f
     dN_dq = dN1_dq + dN2_dq
     dD_dq = (p + 2*n - 2) * (p + 2*n)
     return (dN_dq * D - N * dD_dq) / (D^2)
 end
 
-@inline function _nextapp(f::T, p::T, q::T, n::Int, App::T, Ap::T, Bpp::T, Bp::T) where {T}
+@inline function _nextapp(f::T, p::T, q::T, n::Int, App::T, Ap::T, Bpp::T, Bp::T,
+                         pfq2::T, pf_2q::T, pq_p2pf::T) where {T}
     # One step of the continuant recurrences:
     #   A_n = a_n A_{n-2} + b_n A_{n-1}
     #   B_n = a_n B_{n-2} + b_n B_{n-1}
-    an = _anfun(p, q, f, n)
-    bn = _bnfun(p, q, f, n)
+    an = _anfun(p, q, f, n, pfq2)
+    bn = _bnfun(p, q, n, pf_2q, pq_p2pf)
     An = an * App + bn * Ap
     Bn = an * Bpp + bn * Bp
     return An, Bn, an, bn
@@ -184,26 +179,43 @@ function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T
     # 2) Get tolerence
     ϵ = err
 
+    logbetapq = logbeta(a,b)  # Time-consuming step; symetric in a,b
+
     # 3) Non-boundary path: precompute ∂I/∂x at original (a,b,x) via stable log form
-    dx = exp((a - oneT) * log(x) + (b - oneT) * log1p(-x) - logbeta(a,b))
+    dx = exp((a - oneT) * log(x) + (b - oneT) * log1p(-x) - logbetapq)
 
     # 4) Optional tail-swap for symmetry and improved CF convergence:
     #    if x > a/(a+b), evaluate at (p,q,x₀) = (b,a,1-x) and swap back at the end.
     p    = a
     q    = b
     x₀   = x
-    swap = false
-    if x > a / (a + b)
+    swap = x > a / (a + b)
+    if swap
         x₀   = oneT - x
         p    = b
         q    = a
-        swap = true
     end
 
     # 5) Initialize CF state and derivatives
-    K                    = _Kfun(x₀, p, q)
-    dK_dp_val, dK_dq_val = _dK_dpdq(x₀, p, q)
+    K                    = _Kfun(x₀, p, q, logbetapq)
+    dK_dp_val, dK_dq_val = _dK_dpdq(x₀, p, q, logbetapq)
     f                    = _ffun(x₀, p, q)
+
+    # 5a) Precompute loop-invariant expressions (only depend on p, q, f)
+    pf      = p * f
+    pfq     = pf / q                    # p * f / q
+    pfq2    = pfq * pfq                 # (p * f / q)^2
+    pf_2q   = pf + 2 * q                # p * f + 2 * q
+    p_2_pf  = p - 2 - pf                # p - 2 - p * f
+    pq_p2pf = p * q * p_2_pf            # p * q * (p - 2 - p * f)
+    pqf     = p * q * f                 # for _dbn_dp
+    p2f     = p * p * f                 # p^2 * f, for _dbn_dq
+    pfq_2   = pfq + 2                   # p * (f / q) + 2
+    p2q2    = p + 2*q - 2               # p + 2*q - 2
+    a1      = _a1fun(p, q, f)           # a₁ coefficient
+    da1_dp  = -a1 / (p + 1)             # ∂a₁/∂p
+    da1_dq  = a1 / (q - 1)              # ∂a₁/∂q
+
     App                  = oneT
     Ap                   = oneT
     Bpp                  = zeroT
@@ -227,14 +239,14 @@ function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T
     #    and its derivatives to update I and ∂I/∂(p,q). Stop on relative convergence of all.
     for n=1:maxapp
 
-        # Update continuants. 
-        An, Bn, an, bn = _nextapp(f, p, q, n, App, Ap, Bpp, Bp)
-        dan            = _dan_dp(p, q, f, n)
-        dbn            = _dbn_dp(p, q, f, n)
+        # Update continuants.
+        An, Bn, an, bn = _nextapp(f, p, q, n, App, Ap, Bpp, Bp, pfq2, pf_2q, pq_p2pf)
+        dan            = _dan_dp(p, q, f, n, pfq2, da1_dp)
+        dbn            = _dbn_dp(p, q, n, pf_2q, pq_p2pf, pqf)
         dAn_dp         = _dnextapp(an, bn, dan, dbn, App, Ap, dApp_dp, dAp_dp)
         dBn_dp         = _dnextapp(an, bn, dan, dbn, Bpp, Bp, dBpp_dp, dBp_dp)
-        dan            = _dan_dq(p, q, f, n)
-        dbn            = _dbn_dq(p, q, f, n)
+        dan            = _dan_dq(p, q, n, pfq2, p2q2, da1_dq)
+        dbn            = _dbn_dq(p, q, n, pf_2q, pq_p2pf, p_2_pf, p2f, pfq_2)
         dAn_dq         = _dnextapp(an, bn, dan, dbn, App, Ap, dApp_dq, dAp_dq)
         dBn_dq         = _dnextapp(an, bn, dan, dbn, Bpp, Bp, dBpp_dq, dBp_dq)
 
@@ -265,6 +277,7 @@ function _beta_inc_grad(a::T, b::T, x::T; maxapp::Int=200, minapp::Int=3, err::T
         # Form current approximant Cn=A_n/B_n and its derivatives.
         # Guard against tiny/zero Bn to avoid NaNs/Inf in divisions.
         tiny   = sqrt(eps(T))
+
         absBn  = abs(Bn)
         sgnBn  = ifelse(Bn >= zeroT, oneT, -oneT)
         invBn  = absBn > tiny && isfinite(absBn) ? inv(Bn) : inv(sgnBn * tiny)
@@ -422,3 +435,16 @@ end
 
 
 # a=3.7; b=1.2; x=.3; @btime _beta_inc_grad($a,$b,$x)
+
+# d=1
+# __from  = (p=fill(1/d,d), μ=[0.]     , τ=collect(LinRange(1,d,d)), pDFR=fill(1/3,3), σ=[1.]      , ν=[5.]      , μₘ=[0.]    , σₘ=[10.]     )
+# __xform = (p=SimplextoRⁿ, μ=identity , τ=bcast(log)              , pDFR=SimplextoRⁿ, σ=bcast(log), ν=bcast(log), μₘ=identity, σₘ=bcast(log))
+# __M = HnFmodel(df.z; d, penalty)
+# ___from = pairs(__from)
+# __fromxform = [__xform[p](v) for (p,v) ∈ ___from]  # starting values in optimization parameter space
+# __extractor = zip(keys(___from), Iterators.accumulate((ind,f)->f isa Number ? (last(ind)+1) : last(ind)+1:last(ind)+length(f), __fromxform, init=0))
+# __xformer(x) = (p=>inverse(__xform[p])(x[e]) for (p,e) ∈ __extractor)  # map primary parameters into full model space, expressed as functions of optimization parameters, e.g. exp(log(σ))
+# __objective(x) = -HnFll(__M; __xformer(x)...)
+# __θ = vcat(__fromxform...)
+# [__objective(__θ); ForwardDiff.gradient(__objective, __θ)] - [43366.60740962447, -4080.292638304726, -5061.240886317648, -2333.889966771348, 3059.97435335951, -17562.96774747974, 13275.063164555424, -566.0593935293476, -4654.085929173036]
+

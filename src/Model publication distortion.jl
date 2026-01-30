@@ -911,7 +911,7 @@ end
   penalty(; τ::Vector{T}, σ::Vector{T}, σₘ::Vector{T}, file_drawer_insig::T, kwargs...) where {T} = 
 		logpdf(Normal(0,50), log(σ[])) + 
 		logpdf(Normal(0,50), log(σₘ[])) + 
-		sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) #= +
+		sum(logpdf(Normal(0,5), log(τᵢ)) for τᵢ ∈ τ) #=+
 		logpdf(Beta(2,1),file_drawer_insig)=#
 
 	# Schuemie et al. (2013), https://onlinelibrary.wiley.com/action/downloadSupplement?doi=10.1002%2Fsim.5925&file=Appendix+G+Revision.xlsx
@@ -921,7 +921,7 @@ end
 	disallowmissing!(df, :z)
   Setal = HnFestimate(df, :z; penalty, estname="Setal")
 	HnFplot(df.z, Setal; title="Schuemie et al. (2013) data")
- 
+@profview HnFfit(df.z;d=1, penalty, iterations=0, extended_trace=false)
 	# Star Wars, DOI 10.1257/app.20150044, openicpsr.org/openicpsr/project/113633/version/V1/view?path=/openicpsr/113633/fcr:versions/V1/brodeur_le_sangnier_zylberberg_replication/Data/Final/final_stars_supp.dta&type=file
 	df = DataFrame(CSV.File("data/Brodeur et al. 2016/final_stars_supp.csv"))
 	df.z = df.coefficient_num ./ df.standard_deviation_num
