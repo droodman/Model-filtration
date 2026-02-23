@@ -658,16 +658,16 @@ function add_derived_stats!(est::HnFresult)
 		f_ωz₀(v) = ((ω,z₀)=v; fZ₀condΩ(z₀,ω) * fΩ(ω;p,μ,τ))  # f(z₀)
 
 		f_no_phack(z₀) = begin  # Pr[no p-hacking| |z₀|<z̄]
-				S_H = Tccdf(TDist(ν[]), (z̄+z₀)/σ[]) + Tccdf(TDist(ν[]), (z̄-z₀)/σ[])
-				_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-				ccdf(Normal(0,_σₘ),_μₘ-1)
+			S_H = Tccdf(TDist(ν[]), (z̄+z₀)/σ[]) + Tccdf(TDist(ν[]), (z̄-z₀)/σ[])
+			_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
+			ccdf(Normal(0,_σₘ),_μₘ-1)
 		end
 		f_phacked_insig_z(z₀) = begin  #  Pr[p-hacking tried and |z₁|<z̄ | |z₀|<z̄]
-				lnx = lnI_H(z₀)
-				S_H = Tccdf(TDist(ν[]), (z̄+z₀)/σ[]) + Tccdf(TDist(ν[]), (z̄-z₀)/σ[])
-				_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
-				μ̃ₘ = _μₘ + _σₘ^2 * lnx
-				exp((_μₘ + .5_σₘ^2 * lnx) * lnx + logcdf(Normal(0,_σₘ),μ̃ₘ-1))
+			lnx = lnI_H(z₀)
+			S_H = Tccdf(TDist(ν[]), (z̄+z₀)/σ[]) + Tccdf(TDist(ν[]), (z̄-z₀)/σ[])
+			_μₘ, _σₘ = S_H * μₘ[], S_H * σₘ[]
+			μ̃ₘ = _μₘ + _σₘ^2 * lnx
+			exp((_μₘ + .5_σₘ^2 * lnx) * lnx + logcdf(Normal(0,_σₘ),μ̃ₘ-1))
 		end
 
 		f_Z₁(z₁) = hcubature(v->begin  # distribution of p-hacked z₁
@@ -791,7 +791,7 @@ function HnFplot(z, est, wt::Vector=Float64[]; NLegendre=50, zplot=-5+1e-3:.01:5
 	_z = 2.
 	Axis(f[2,1], xlabel="True z | reported z = $_z", ylabel="Density")
 	lines!(ωplot, fΩcondZ.(ωplot, _z; kwargsω..., kwargsz0..., NLegendre), label="updating from prior")
-	lines!(ωplot, fΩcondZ.(ωplot, _z; kwargsω..., kwargsz..., NLegendre), label="updating from prior + research p-hacking", color=Makie.wong_colors()[6])
+	lines!(ωplot, fΩcondZ.(ωplot, _z; kwargsω..., kwargsz..., NLegendre), label="updating from prior + p-hacking", color=Makie.wong_colors()[6])
 	axislegend(position=:lt, framevisible = false)
 	
 	# frequentist equal-tailed CI's as fn of z--Andrews & Kasy (2014), Figure 2
@@ -1017,4 +1017,3 @@ hist(df.z)
 res = Optim.optimize(θ -> -sum(logpdf(GenT(exp(θ[1]), θ[2], exp(θ[3])),z) for z ∈ df.z), [5.,0,1])
 θ = res.minimizer
 (ν = exp(θ[1]), μ = θ[2], σ=exp(θ[3]))
-
